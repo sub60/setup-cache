@@ -1,7 +1,8 @@
 use core::convert::Infallible;
+use core::num::NonZeroU64;
 
 use futures::AsyncRead;
-use nix_types::{NarInfo, NarInfoFileName, StorePath};
+use nix_types::{NarFileName, NarInfo, NarInfoFileName};
 
 use crate::context::Cache;
 use crate::protocol::StoreDir;
@@ -10,7 +11,6 @@ use crate::protocol::StoreDir;
 pub(crate) struct NoopCache {}
 
 impl Cache for NoopCache {
-    type NarUploadState = ();
     type Error = Infallible;
 
     async fn has_narinfo(
@@ -20,16 +20,10 @@ impl Cache for NoopCache {
         Ok(false)
     }
 
-    async fn initiate_nar_upload(
-        &self,
-        _: &StorePath<StoreDir>,
-    ) -> Result<Self::NarUploadState, Self::Error> {
-        Ok(())
-    }
-
     async fn upload_nar(
         &self,
-        (): &mut Self::NarUploadState,
+        _: NarFileName,
+        _: NonZeroU64,
         nar_bytes: impl AsyncRead + Send + 'static,
     ) -> Result<(), Self::Error> {
         let mut sink = futures::io::sink();
@@ -41,7 +35,6 @@ impl Cache for NoopCache {
         &self,
         _: NarInfoFileName,
         narinfo: NarInfo<(), StoreDir>,
-        (): Self::NarUploadState,
     ) -> Result<u64, Self::Error> {
         Ok(narinfo.with_url("").to_string().len() as u64)
     }

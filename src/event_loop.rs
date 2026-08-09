@@ -4,11 +4,21 @@ use core::task::{Context as TaskContext, Poll};
 use std::collections::{HashSet, VecDeque};
 use std::io;
 
-use async_compat::Compat;
+use async_compression::futures::write::ZstdEncoder;
+use futures::io::BufWriter;
 use futures::stream::{FusedStream, FuturesUnordered};
-use futures::{AsyncRead, AsyncWrite, StreamExt, TryFutureExt, future, select};
+use futures::{
+    AsyncRead,
+    AsyncSeekExt,
+    AsyncWrite,
+    AsyncWriteExt,
+    StreamExt,
+    future,
+    select,
+};
 use nix_types::{
     CompressionAlgorithm,
+    NarFileName,
     NarInfo,
     NarInfoFileName,
     Nix32Digest,
@@ -33,8 +43,11 @@ use crate::run::RunArgs;
 /// Maximum number of store paths handled concurrently.
 const MAX_CONCURRENT_STORE_PATHS: usize = 32;
 
-/// Capacity of the in-memory buffer used to stream a NAR to the cache.
-const NAR_STREAM_BUFFER_SIZE: usize = 64 * 1024;
+/// The algorithm used to compress NARs uploaded to the cache.
+const NAR_COMPRESSION_ALGORITHM: CompressionAlgorithm =
+    CompressionAlgorithm::Zstd;
+
+const NAR_TEMPORARY_FILE_BUFFER_SIZE: usize = 64 * 1024;
 
 pub(crate) trait Io: Send + 'static {
     type Reader: AsyncRead + Send;
@@ -70,18 +83,22 @@ pub(crate) struct ActionReport<Ctx: Context> {
 pub(crate) enum HandlePathError<C: Cache, N: Nix> {
     #[display("couldn't check NARInfo existence on remote cache")]
     CheckNarInfoExistence(#[source] C::Error),
-    #[display("couldn't create NAR upload ID")]
-    CreateNarUploadId(#[source] C::Error),
+    #[display("couldn't create temporary file to read NAR into")]
+    CreateTempFile(#[source] io::Error),
+    #[display("couldn't finish compressing NAR")]
+    FinishNarCompression(#[source] io::Error),
     #[display("couldn't get store path infos")]
     GetPathInfos(#[source] N::PathInfosError),
+    #[display("couldn't read NAR from store")]
+    ReadNar(#[source] N::ReadNarError),
+    #[display("read zero bytes from {_0}'s NAR")]
+    ReadZeroNarBytes(StorePath<StoreDir>),
+    #[display("couldn't rewind temporary file's cursor")]
+    RewindTempFile(#[source] io::Error),
     #[display("couldn't upload NAR to cache")]
     UploadNar(#[source] C::Error),
     #[display("couldn't upload NARInfo to cache")]
     UploadNarInfo(#[source] C::Error),
-    #[display("couldn't get NAR from store")]
-    WriteNar(#[source] N::WriteNarError),
-    #[display("got empty NAR from store")]
-    WriteNarWroteZeroBytes,
 }
 
 enum Event<Writer> {
@@ -286,75 +303,75 @@ async fn handle_store_path<C: Cache, H: HttpClient, N: Nix>(
         return Ok(None);
     }
 
-    let mut nar_upload_state = cache
-        .initiate_nar_upload(store_path)
+    let nar_buf = tempfile::tempfile()
+        .map(tokio::fs::File::from_std)
+        .map(async_compat::Compat::new)
+        .map(|f| BufWriter::with_capacity(NAR_TEMPORARY_FILE_BUFFER_SIZE, f))
+        .map_err(HandlePathError::CreateTempFile)?;
+
+    let mut nar_encoder = ZstdEncoder::new(HashAndCountWriter::new(nar_buf));
+
+    nix.read_nar(store_path, &mut nar_encoder)
         .await
-        .map_err(HandlePathError::CreateNarUploadId)?;
+        .map_err(HandlePathError::ReadNar)?;
+
+    nar_encoder.close().await.map_err(HandlePathError::FinishNarCompression)?;
+
+    let writer = nar_encoder.into_inner();
+
+    let file_hash = Nix32Digest::new(&writer.sha256.finalize().into());
+
+    let file_size = NonZeroU64::new(writer.num_bytes_written)
+        .ok_or_else(|| HandlePathError::ReadZeroNarBytes(store_path.clone()))?;
+
+    let nar_file_name = NarFileName {
+        file_hash,
+        extension: NAR_COMPRESSION_ALGORITHM.extension(),
+    };
+
+    let mut nar_buf = writer.inner;
+
+    // Rewind the buffers's cursor to let the cache read its contents from the
+    // beginning.
+    nar_buf
+        .seek(io::SeekFrom::Start(0))
+        .await
+        .map_err(HandlePathError::RewindTempFile)?;
 
     // Just like `nix copy --to`, we write the NAR *before* the NARInfo to avoid
     // the cache server temporarily reporting false positives.
 
-    let (reader, writer) = tokio::io::duplex(NAR_STREAM_BUFFER_SIZE);
-
-    let mut writer = HashAndCountWriter::new(Compat::new(writer));
-
-    // This stops polling either half as soon as the other one fails.
-    future::try_join(
-        nix.write_nar(store_path, &mut writer)
-            .map_err(HandlePathError::WriteNar),
-        cache
-            .upload_nar(&mut nar_upload_state, Compat::new(reader))
-            .map_err(HandlePathError::UploadNar),
-    )
-    .await?;
-
-    let nar_hash = Nix32Digest::new(&writer.sha256.finalize().into());
-
-    let nar_size = NonZeroU64::new(writer.num_bytes_written)
-        .ok_or(HandlePathError::WriteNarWroteZeroBytes)?;
-
-    let mut infos = nix
-        .get_path_infos(store_path)
+    cache
+        .upload_nar(nar_file_name, file_size, nar_buf)
         .await
-        .map_err(HandlePathError::GetPathInfos)?;
+        .map_err(HandlePathError::UploadNar)?;
 
-    let references = infos
-        .references()
-        .map_err(HandlePathError::GetPathInfos)?
-        .into_iter()
-        .collect();
+    let get_narinfo = async {
+        let mut infos = nix.get_path_infos(store_path).await?;
 
-    let deriver = infos.deriver().map_err(HandlePathError::GetPathInfos)?;
-
-    let signatures = infos
-        .signatures()
-        .map_err(HandlePathError::GetPathInfos)?
-        .into_iter()
-        .collect();
-
-    let content_address =
-        infos.content_address().map_err(HandlePathError::GetPathInfos)?;
-
-    let narinfo = NarInfo {
-        store_path: store_path.clone(),
-        url: (),
-        compression: CompressionAlgorithm::None,
-        file_hash: nar_hash,
-        file_size: nar_size,
-        nar_hash,
-        nar_size,
-        references,
-        deriver,
-        signatures,
-        content_address,
+        Ok(NarInfo {
+            store_path: store_path.clone(),
+            url: (),
+            compression: NAR_COMPRESSION_ALGORITHM,
+            file_hash,
+            file_size,
+            nar_hash: infos.nar_hash()?,
+            nar_size: infos.nar_size()?,
+            references: infos.references()?.into_iter().collect(),
+            deriver: infos.deriver()?,
+            signatures: infos.signatures()?.into_iter().collect(),
+            content_address: infos.content_address()?,
+        })
     };
 
+    let narinfo = get_narinfo.await.map_err(HandlePathError::GetPathInfos)?;
+
     let narinfo_size = cache
-        .upload_narinfo(narinfo_filename, narinfo, nar_upload_state)
+        .upload_narinfo(narinfo_filename, narinfo)
         .await
         .map_err(HandlePathError::UploadNarInfo)?;
 
-    Ok(Some(nar_size.saturating_add(narinfo_size)))
+    Ok(Some(file_size.saturating_add(narinfo_size)))
 }
 
 async fn should_push_store_path<C: Cache, H: HttpClient>(

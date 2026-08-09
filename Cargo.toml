@@ -8,6 +8,7 @@ sub60-cache = []
 
 [dependencies]
 async-compat = "0.2"
+async-compression = { version = "0.4", features = ["futures-io", "zstd"] }
 bytes = "1"
 cauchy = { git = "https://github.com/nomad/cauchy.git" }
 clap = { version = "4.5.38", features = ["derive"] }
@@ -34,6 +35,7 @@ sha2 = "0.11"
 smallvec = "1"
 smol_str = "0.3.6"
 sub60-cache = { git = "https://github.com/sub60/cache.git" }
+tempfile = "3"
 tokio = { version = "1", default-features = false, features = [
   "fs",
   "io-std",

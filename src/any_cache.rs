@@ -1,5 +1,7 @@
+use core::num::NonZeroU64;
+
 use futures::AsyncRead;
-use nix_types::{NarInfo, NarInfoFileName, StorePath};
+use nix_types::{NarFileName, NarInfo, NarInfoFileName};
 
 use crate::context::Cache;
 use crate::noop_cache::NoopCache;
@@ -17,11 +19,6 @@ pub(crate) enum AnyCache {
 pub(crate) enum AnyCacheKind {
     Noop,
     Sub60,
-}
-
-pub(crate) enum AnyCacheNarUploadState {
-    Noop(<NoopCache as Cache>::NarUploadState),
-    Sub60(<Sub60Cache as Cache>::NarUploadState),
 }
 
 #[derive(Debug, derive_more::Display, cauchy::Error)]
@@ -46,7 +43,6 @@ impl AnyCache {
 }
 
 impl Cache for AnyCache {
-    type NarUploadState = AnyCacheNarUploadState;
     type Error = AnyCacheError;
 
     async fn has_narinfo(
@@ -63,39 +59,21 @@ impl Cache for AnyCache {
         }
     }
 
-    async fn initiate_nar_upload(
-        &self,
-        store_path: &StorePath<StoreDir>,
-    ) -> Result<Self::NarUploadState, Self::Error> {
-        match self {
-            Self::Noop(cache) => cache
-                .initiate_nar_upload(store_path)
-                .await
-                .map(AnyCacheNarUploadState::from)
-                .map_err(Into::into),
-            Self::Sub60(cache) => cache
-                .initiate_nar_upload(store_path)
-                .await
-                .map(AnyCacheNarUploadState::from)
-                .map_err(Into::into),
-        }
-    }
-
     async fn upload_nar(
         &self,
-        state: &mut Self::NarUploadState,
+        nar_file_name: NarFileName,
+        nar_size: NonZeroU64,
         nar_bytes: impl AsyncRead + Send + 'static,
     ) -> Result<(), Self::Error> {
-        match (self, state) {
-            (Self::Noop(cache), AnyCacheNarUploadState::Noop(state)) => {
-                cache.upload_nar(state, nar_bytes).await.map_err(Into::into)
-            },
-            (Self::Sub60(cache), AnyCacheNarUploadState::Sub60(state)) => {
-                cache.upload_nar(state, nar_bytes).await.map_err(Into::into)
-            },
-            _ => unreachable!(
-                "AnyCache used with another cache variant's NAR upload state"
-            ),
+        match self {
+            Self::Noop(cache) => cache
+                .upload_nar(nar_file_name, nar_size, nar_bytes)
+                .await
+                .map_err(Into::into),
+            Self::Sub60(cache) => cache
+                .upload_nar(nar_file_name, nar_size, nar_bytes)
+                .await
+                .map_err(Into::into),
         }
     }
 
@@ -103,20 +81,16 @@ impl Cache for AnyCache {
         &self,
         narinfo_filename: NarInfoFileName,
         narinfo: NarInfo<(), StoreDir>,
-        state: Self::NarUploadState,
     ) -> Result<u64, Self::Error> {
-        match (self, state) {
-            (Self::Noop(cache), AnyCacheNarUploadState::Noop(state)) => cache
-                .upload_narinfo(narinfo_filename, narinfo, state)
+        match self {
+            Self::Noop(cache) => cache
+                .upload_narinfo(narinfo_filename, narinfo)
                 .await
                 .map_err(Into::into),
-            (Self::Sub60(cache), AnyCacheNarUploadState::Sub60(state)) => cache
-                .upload_narinfo(narinfo_filename, narinfo, state)
+            Self::Sub60(cache) => cache
+                .upload_narinfo(narinfo_filename, narinfo)
                 .await
                 .map_err(Into::into),
-            _ => unreachable!(
-                "AnyCache used with another cache variant's NAR upload state"
-            ),
         }
     }
 }
@@ -130,18 +104,6 @@ impl From<NoopCache> for AnyCache {
 impl From<Sub60Cache> for AnyCache {
     fn from(cache: Sub60Cache) -> Self {
         Self::Sub60(cache)
-    }
-}
-
-impl From<<NoopCache as Cache>::NarUploadState> for AnyCacheNarUploadState {
-    fn from(state: <NoopCache as Cache>::NarUploadState) -> Self {
-        Self::Noop(state)
-    }
-}
-
-impl From<<Sub60Cache as Cache>::NarUploadState> for AnyCacheNarUploadState {
-    fn from(state: <Sub60Cache as Cache>::NarUploadState) -> Self {
-        Self::Sub60(state)
     }
 }
 

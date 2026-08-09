@@ -1,13 +1,12 @@
 use core::ffi::CStr;
+use core::num::NonZeroU64;
 use core::ops::ControlFlow;
-use core::pin::pin;
 use std::ffi::OsString;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use async_compat::Compat;
 use nix_compat::nar::writer::r#async as nar_writer;
 use nix_types::{
     ContentAddress,
@@ -19,7 +18,7 @@ use nix_types::{
 use nixb::store::GetFsClosureOpts;
 use smallvec::SmallVec;
 use tokio::fs;
-use tokio::io::{AsyncWriteExt as _, BufReader};
+use tokio::io::BufReader;
 
 use crate::context;
 use crate::protocol::StoreDir;
@@ -58,8 +57,8 @@ impl context::Nix for NixStore {
     type PathInfos<'a> = nixb::store::PathInfo;
 
     type PathInfosError = nixb::Error;
+    type ReadNarError = io::Error;
     type StoreClosureError = nixb::Error;
-    type WriteNarError = io::Error;
 
     async fn get_path_infos<'a>(
         &mut self,
@@ -69,16 +68,16 @@ impl context::Nix for NixStore {
         self.store.query_path_info(&path)
     }
 
-    async fn write_nar(
+    async fn read_nar(
         &mut self,
         store_path: &StorePath<StoreDir>,
-        writer: impl futures::AsyncWrite + Send,
-    ) -> Result<(), Self::WriteNarError> {
+        buf: &mut (impl futures::AsyncWrite + Unpin + Send),
+    ) -> Result<(), Self::ReadNarError> {
         let store_path = store_path.to_string();
-        let mut writer = pin!(Compat::new(writer));
+        let mut writer = async_compat::Compat::new(buf);
         let root = nar_writer::open(&mut writer).await?;
         write_nar(root, Path::new(&store_path)).await?;
-        writer.shutdown().await
+        Ok(())
     }
 
     async fn store_closure(
@@ -131,6 +130,28 @@ impl context::StorePathInfos for nixb::store::PathInfo {
     fn deriver(&mut self) -> Result<Option<StoreBasename>, Self::Error> {
         let Some(store_path) = self.get_deriver()? else { return Ok(None) };
         store_path.basename().map(Some)
+    }
+
+    fn nar_hash(&mut self) -> Result<Nix32Digest<32>, Self::Error> {
+        self.with_nar_hash(|nar_hash| {
+            let Some(nar_hash) = nar_hash.strip_prefix("sha256:") else {
+                return Err(nixb::Error::from_message(format_args!(
+                    "NAR hash is not SHA-256: {nar_hash:?}"
+                )));
+            };
+
+            nar_hash.parse().map_err(|err| {
+                nixb::Error::from_message(format_args!(
+                    "couldn't parse NAR hash {nar_hash:?}: {err}"
+                ))
+            })
+        })?
+    }
+
+    fn nar_size(&mut self) -> Result<NonZeroU64, Self::Error> {
+        self.get_nar_size()?.ok_or_else(|| {
+            nixb::Error::from_message("NAR size is missing or zero")
+        })
     }
 
     fn references(

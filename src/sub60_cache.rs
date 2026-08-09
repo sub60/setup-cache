@@ -1,4 +1,4 @@
-use core::num::{NonZeroU16, NonZeroU32};
+use core::num::{NonZeroU16, NonZeroU64};
 use core::pin::pin;
 use core::str::FromStr;
 use core::time::Duration;
@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::{Bytes, BytesMut};
 use futures::AsyncRead;
-use nix_types::{NarInfo, NarInfoFileName, StoreBasename, StorePath};
+use nix_types::{NarFileName, NarInfo, NarInfoFileName};
 use reqwest::{Method, StatusCode, header};
 use smallvec::SmallVec;
 use sub60_cache::nar_multiparts::{
@@ -43,10 +43,8 @@ pub(crate) struct Sub60Cache {
 pub(crate) struct Sub60CacheRunArgs {
     #[arg(long)]
     user: UserName,
-
     #[arg(long)]
     cache: CacheName,
-
     #[arg(long)]
     auth_token: AuthToken,
 }
@@ -105,14 +103,6 @@ pub(crate) enum CacheRequestError {
     },
 }
 
-pub(crate) struct NarUploadState {
-    part_size: NonZeroU32,
-    part_urls: VecDeque<url::Url>,
-    store_basename: StoreBasename,
-    upload_id: UploadId,
-    urls_expiration_ts: Duration,
-}
-
 #[derive(Debug, derive_more::Display, cauchy::Error)]
 pub(crate) enum QuotedFromStrError<T> {
     #[display("value must be wrapped in double quotes")]
@@ -154,18 +144,55 @@ impl Sub60Cache {
         Ok(Self { cache_url, client })
     }
 
-    async fn complete_nar_upload(
+    async fn initiate_multipart_nar_upload(
         &self,
+        nar_file_name: &NarFileName,
+    ) -> Result<NarMultipartsResponseBody, CacheRequestError> {
+        let url = self.nar_multiparts_url();
+
+        let response = self
+            .client
+            .post(url.clone())
+            .body(nar_file_name.to_string())
+            .send()
+            .await
+            .map_err(|source| CacheRequestError::HttpRequest {
+                method: Method::POST,
+                source,
+            })?;
+
+        if !response.status().is_success() {
+            return Err(CacheRequestError::unexpected_response(
+                response,
+                Method::POST,
+                url,
+            )
+            .await);
+        }
+
+        response
+            .text()
+            .await
+            .map_err(|source| CacheRequestError::HttpRequest {
+                method: Method::POST,
+                source,
+            })?
+            .parse::<NarMultipartsResponseBody>()
+            .map_err(CacheRequestError::ParseNarMultipartsResponseBody)
+    }
+
+    async fn complete_multipart_nar_upload(
+        &self,
+        nar_file_name: NarFileName,
         upload_id: &UploadId,
         etags: SmallVec<[Etag; 8]>,
-        store_basename: StoreBasename,
     ) -> Result<(), CacheRequestError> {
         let url = self.nar_multiparts_complete_url(upload_id);
 
         let response = self
             .client
             .post(url.clone())
-            .body(CompleteRequestBody { etags, store_basename }.to_string())
+            .body(CompleteRequestBody { etags, nar_file_name }.to_string())
             .send()
             .await
             .map_err(|source| CacheRequestError::HttpRequest {
@@ -190,16 +217,6 @@ impl Sub60Cache {
         url.path_segments_mut()
             .expect("cache URL can be a base")
             .push(&narinfo_filename.to_string());
-        url
-    }
-
-    fn narinfo_upload_url(
-        &self,
-        narinfo_filename: &NarInfoFileName,
-        upload_id: &UploadId,
-    ) -> url::Url {
-        let mut url = self.narinfo_url(narinfo_filename);
-        url.query_pairs_mut().append_pair("upload_id", upload_id);
         url
     }
 
@@ -233,14 +250,14 @@ impl Sub60Cache {
         &self,
         upload_id: &UploadId,
         part_numbers: SmallVec<[NonZeroU16; 8]>,
-        store_basename: StoreBasename,
+        nar_file_name: NarFileName,
     ) -> Result<PartsResponseBody, CacheRequestError> {
         let url = self.nar_multiparts_parts_url(upload_id);
 
         let response = self
             .client
             .post(url.clone())
-            .body(PartsRequestBody { part_numbers, store_basename }.to_string())
+            .body(PartsRequestBody { part_numbers, nar_file_name }.to_string())
             .send()
             .await
             .map_err(|source| CacheRequestError::HttpRequest {
@@ -268,7 +285,7 @@ impl Sub60Cache {
             .map_err(CacheRequestError::ParsePartsResponseBody)
     }
 
-    async fn upload_part(
+    async fn upload_nar_part(
         &self,
         url: url::Url,
         part_bytes: Bytes,
@@ -312,6 +329,87 @@ impl Sub60Cache {
             .map(|Quoted(etag)| etag)
             .map_err(CacheRequestError::ParseEtag)
     }
+
+    async fn upload_nar_multiparts(
+        &self,
+        nar_file_name: &NarFileName,
+        initiate_body: &NarMultipartsResponseBody,
+        nar_bytes: impl AsyncRead + Send + 'static,
+    ) -> Result<SmallVec<[Etag; 8]>, CacheRequestError> {
+        let part_size = initiate_body.part_size.get() as usize;
+        let mut part_urls = VecDeque::from(initiate_body.parts_urls.clone());
+        let mut urls_expiration_ts = initiate_body.expiration_ts;
+
+        let mut nar_bytes = pin!(nar_bytes);
+        let mut part_number = NonZeroU16::MIN;
+        let mut etags = SmallVec::new();
+        let mut part_bytes_buf = BytesMut::zeroed(part_size);
+
+        loop {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("we're past the UNIX epoch");
+
+            // Discard the current upload URLs if they're past their expiration
+            // timestamp, with some safety buffer to account for clock skew and
+            // network delay.
+            if now + Duration::from_secs(10) >= urls_expiration_ts {
+                part_urls.clear();
+            }
+
+            let Some(part_url) = part_urls.pop_front() else {
+                let new_part_numbers =
+                    iter::successors(Some(part_number), |part_number| {
+                        part_number.checked_add(1)
+                    })
+                    .take(4)
+                    .collect::<SmallVec<_>>();
+                let parts = self
+                    .request_part_urls(
+                        &initiate_body.upload_id,
+                        new_part_numbers,
+                        nar_file_name.clone(),
+                    )
+                    .await?;
+                part_urls.extend(parts.urls);
+                urls_expiration_ts = parts.expiration_ts;
+                continue;
+            };
+
+            let num_read = nar_bytes
+                .as_mut()
+                .try_fill(&mut part_bytes_buf[..])
+                .await
+                .map_err(CacheRequestError::ReadNar)?;
+
+            if num_read == 0 {
+                break;
+            }
+
+            part_bytes_buf.truncate(num_read);
+
+            let part_bytes = part_bytes_buf.freeze();
+
+            let etag =
+                self.upload_nar_part(part_url, part_bytes.clone()).await?;
+
+            etags.push(etag);
+
+            if num_read < part_size {
+                break;
+            }
+
+            part_bytes_buf = part_bytes
+                .try_into_mut()
+                .unwrap_or_else(|_| BytesMut::zeroed(part_size));
+
+            part_number = part_number
+                .checked_add(1)
+                .ok_or(CacheRequestError::TooManyNarParts)?;
+        }
+
+        Ok(etags)
+    }
 }
 
 impl CacheRequestError {
@@ -332,7 +430,6 @@ impl CacheRequestError {
 }
 
 impl context::Cache for Sub60Cache {
-    type NarUploadState = NarUploadState;
     type Error = CacheRequestError;
 
     async fn has_narinfo(
@@ -358,129 +455,23 @@ impl context::Cache for Sub60Cache {
         }
     }
 
-    async fn initiate_nar_upload(
-        &self,
-        store_path: &StorePath<StoreDir>,
-    ) -> Result<Self::NarUploadState, Self::Error> {
-        let url = self.nar_multiparts_url();
-
-        let response = self
-            .client
-            .post(url.clone())
-            .body(store_path.basename().to_string())
-            .send()
-            .await
-            .map_err(|source| CacheRequestError::HttpRequest {
-                method: Method::POST,
-                source,
-            })?;
-
-        if !response.status().is_success() {
-            return Err(CacheRequestError::unexpected_response(
-                response,
-                Method::POST,
-                url,
-            )
-            .await);
-        }
-
-        let body = response
-            .text()
-            .await
-            .map_err(|source| CacheRequestError::HttpRequest {
-                method: Method::POST,
-                source,
-            })?
-            .parse::<NarMultipartsResponseBody>()
-            .map_err(CacheRequestError::ParseNarMultipartsResponseBody)?;
-
-        Ok(NarUploadState {
-            part_size: body.part_size,
-            part_urls: body.parts_urls.into_iter().collect(),
-            store_basename: store_path.basename().clone(),
-            upload_id: body.upload_id,
-            urls_expiration_ts: body.expiration_ts,
-        })
-    }
-
     async fn upload_nar(
         &self,
-        state: &mut Self::NarUploadState,
+        nar_file_name: NarFileName,
+        _nar_size: NonZeroU64,
         nar_bytes: impl AsyncRead + Send + 'static,
     ) -> Result<(), Self::Error> {
-        let part_size = state.part_size.get() as usize;
+        let initiate_body =
+            self.initiate_multipart_nar_upload(&nar_file_name).await?;
 
-        let mut nar_bytes = pin!(nar_bytes);
-        let mut part_number = NonZeroU16::MIN;
-        let mut etags = SmallVec::new();
-        let mut part_bytes_buf = BytesMut::zeroed(part_size);
+        let etags = self
+            .upload_nar_multiparts(&nar_file_name, &initiate_body, nar_bytes)
+            .await?;
 
-        loop {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("we're past the UNIX epoch");
-
-            // Discard the current upload URLs if they're past their expiration
-            // timestamp, with some safety buffer to account for clock skew and
-            // network delay.
-            if now + Duration::from_secs(10) >= state.urls_expiration_ts {
-                state.part_urls.clear();
-            }
-
-            let Some(part_url) = state.part_urls.pop_front() else {
-                let new_part_numbers =
-                    iter::successors(Some(part_number), |part_number| {
-                        part_number.checked_add(1)
-                    })
-                    .take(4)
-                    .collect::<SmallVec<_>>();
-                let parts = self
-                    .request_part_urls(
-                        &state.upload_id,
-                        new_part_numbers,
-                        state.store_basename.clone(),
-                    )
-                    .await?;
-                state.part_urls.extend(parts.urls);
-                state.urls_expiration_ts = parts.expiration_ts;
-                continue;
-            };
-
-            let num_read = nar_bytes
-                .as_mut()
-                .try_fill(&mut part_bytes_buf[..])
-                .await
-                .map_err(CacheRequestError::ReadNar)?;
-
-            if num_read == 0 {
-                break;
-            }
-
-            part_bytes_buf.truncate(num_read);
-
-            let part_bytes = part_bytes_buf.freeze();
-
-            let etag = self.upload_part(part_url, part_bytes.clone()).await?;
-
-            etags.push(etag);
-
-            if num_read < part_size {
-                break;
-            }
-
-            part_bytes_buf = part_bytes
-                .try_into_mut()
-                .unwrap_or_else(|_| BytesMut::zeroed(part_size));
-
-            part_number = part_number
-                .checked_add(1)
-                .ok_or(CacheRequestError::TooManyNarParts)?;
-        }
-
-        self.complete_nar_upload(
-            &state.upload_id,
+        self.complete_multipart_nar_upload(
+            nar_file_name,
+            &initiate_body.upload_id,
             etags,
-            state.store_basename.clone(),
         )
         .await
     }
@@ -489,14 +480,12 @@ impl context::Cache for Sub60Cache {
         &self,
         narinfo_filename: NarInfoFileName,
         narinfo: NarInfo<(), StoreDir>,
-        nar_upload_state: Self::NarUploadState,
     ) -> Result<u64, Self::Error> {
         let narinfo = narinfo.with_url("").to_string();
 
         let narinfo_size = narinfo.len() as u64;
 
-        let url = self
-            .narinfo_upload_url(&narinfo_filename, &nar_upload_state.upload_id);
+        let url = self.narinfo_url(&narinfo_filename);
 
         let response =
             self.client.put(url.clone()).body(narinfo).send().await.map_err(

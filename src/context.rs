@@ -4,8 +4,10 @@ use core::num::NonZeroU64;
 use futures::{AsyncRead, AsyncWrite};
 use nix_types::{
     ContentAddress,
+    NarFileName,
     NarInfo,
     NarInfoFileName,
+    Nix32Digest,
     Signature,
     StoreBasename,
     StorePath,
@@ -36,7 +38,6 @@ pub trait Context {
 }
 
 pub trait Cache: Clone + Send + Sync + 'static {
-    type NarUploadState: Send;
     type Error: Error + Send;
 
     fn has_narinfo(
@@ -44,14 +45,10 @@ pub trait Cache: Clone + Send + Sync + 'static {
         narinfo_filename: &NarInfoFileName,
     ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
 
-    fn initiate_nar_upload(
-        &self,
-        store_path: &StorePath<StoreDir>,
-    ) -> impl Future<Output = Result<Self::NarUploadState, Self::Error>> + Send;
-
     fn upload_nar(
         &self,
-        upload_state: &mut Self::NarUploadState,
+        nar_file_name: NarFileName,
+        nar_size: NonZeroU64,
         nar_bytes: impl AsyncRead + Send + 'static,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
@@ -59,7 +56,6 @@ pub trait Cache: Clone + Send + Sync + 'static {
         &self,
         narinfo_filename: NarInfoFileName,
         narinfo: NarInfo<(), StoreDir>,
-        nar_upload_state: Self::NarUploadState,
     ) -> impl Future<Output = Result<u64, Self::Error>> + Send;
 }
 
@@ -105,8 +101,8 @@ pub trait Nix: Clone + Send + 'static {
     type PathInfos<'path>: StorePathInfos<Error = Self::PathInfosError> + Send;
 
     type PathInfosError: Error + Send;
+    type ReadNarError: Error + Send;
     type StoreClosureError: Error + Send;
-    type WriteNarError: Error + Send;
 
     fn get_path_infos<'path>(
         &mut self,
@@ -115,18 +111,18 @@ pub trait Nix: Clone + Send + 'static {
         Output = Result<Self::PathInfos<'path>, Self::PathInfosError>,
     > + Send;
 
+    fn read_nar(
+        &mut self,
+        store_path: &StorePath<StoreDir>,
+        buf: &mut (impl AsyncWrite + Unpin + Send),
+    ) -> impl Future<Output = Result<(), Self::ReadNarError>> + Send;
+
     fn store_closure(
         &mut self,
         store_path: &StorePath<StoreDir>,
     ) -> impl Future<
         Output = Result<Vec<StorePath<StoreDir>>, Self::StoreClosureError>,
     > + Send;
-
-    fn write_nar(
-        &mut self,
-        store_path: &StorePath<StoreDir>,
-        writer: impl AsyncWrite + Send,
-    ) -> impl Future<Output = Result<(), Self::WriteNarError>> + Send;
 }
 
 pub trait StorePathInfos {
@@ -138,13 +134,17 @@ pub trait StorePathInfos {
 
     fn deriver(&mut self) -> Result<Option<StoreBasename>, Self::Error>;
 
+    fn nar_hash(&mut self) -> Result<Nix32Digest<32>, Self::Error>;
+
+    fn nar_size(&mut self) -> Result<NonZeroU64, Self::Error>;
+
     fn references(
         &mut self,
-    ) -> Result<impl IntoIterator<Item = StoreBasename>, Self::Error>;
+    ) -> Result<impl IntoIterator<Item = StoreBasename> + use<Self>, Self::Error>;
 
     fn signatures(
         &mut self,
-    ) -> Result<impl IntoIterator<Item = Signature>, Self::Error>;
+    ) -> Result<impl IntoIterator<Item = Signature> + use<Self>, Self::Error>;
 }
 
 pub trait Spawner {
