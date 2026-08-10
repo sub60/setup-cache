@@ -5,7 +5,7 @@ use std::collections::{HashSet, VecDeque};
 use std::io;
 
 use async_compression::futures::write::ZstdEncoder;
-use futures::io::BufWriter;
+use futures::io::{BufWriter, Cursor};
 use futures::stream::{FusedStream, FuturesUnordered};
 use futures::{
     AsyncRead,
@@ -42,6 +42,9 @@ use crate::run::RunArgs;
 
 /// Maximum number of store paths handled concurrently.
 const MAX_CONCURRENT_STORE_PATHS: usize = 32;
+
+/// Target upper bound for memory occupied by all in-memory NAR buffers.
+const MAX_IN_MEMORY_NAR_BUFFERS_SIZE: usize = 256 * 1024 * 1024;
 
 /// The algorithm used to compress NARs uploaded to the cache.
 const NAR_COMPRESSION_ALGORITHM: CompressionAlgorithm =
@@ -93,8 +96,8 @@ pub(crate) enum HandlePathError<C: Cache, N: Nix> {
     ReadNar(#[source] N::ReadNarError),
     #[display("read zero bytes from {_0}'s NAR")]
     ReadZeroNarBytes(StorePath<StoreDir>),
-    #[display("couldn't rewind temporary file's cursor")]
-    RewindTempFile(#[source] io::Error),
+    #[display("couldn't rewind NAR buffer's cursor")]
+    RewindNarBuffer(#[source] io::Error),
     #[display("couldn't upload NAR to cache")]
     UploadNar(#[source] C::Error),
     #[display("couldn't upload NARInfo to cache")]
@@ -303,11 +306,29 @@ async fn handle_store_path<C: Cache, H: HttpClient, N: Nix>(
         return Ok(None);
     }
 
-    let nar_buf = tempfile::tempfile()
-        .map(tokio::fs::File::from_std)
-        .map(async_compat::Compat::new)
-        .map(|f| BufWriter::with_capacity(NAR_TEMPORARY_FILE_BUFFER_SIZE, f))
-        .map_err(HandlePathError::CreateTempFile)?;
+    let mut infos = nix
+        .get_path_infos(store_path)
+        .await
+        .map_err(HandlePathError::GetPathInfos)?;
+
+    let nar_size = infos.nar_size().map_err(HandlePathError::GetPathInfos)?;
+
+    // Small NARs are written to and read from in-memory buffers, while larger
+    // ones are buffered in temporary files to keep peak memory usage bounded.
+    let nar_buf = if nar_size.get()
+        <= (MAX_IN_MEMORY_NAR_BUFFERS_SIZE / MAX_CONCURRENT_STORE_PATHS) as u64
+    {
+        future::Either::Left(Cursor::new(Vec::new()))
+    } else {
+        let file = tempfile::tempfile()
+            .map(tokio::fs::File::from_std)
+            .map(async_compat::Compat::new)
+            .map(|f| {
+                BufWriter::with_capacity(NAR_TEMPORARY_FILE_BUFFER_SIZE, f)
+            })
+            .map_err(HandlePathError::CreateTempFile)?;
+        future::Either::Right(file)
+    };
 
     let mut nar_encoder = ZstdEncoder::new(HashAndCountWriter::new(nar_buf));
 
@@ -331,12 +352,12 @@ async fn handle_store_path<C: Cache, H: HttpClient, N: Nix>(
 
     let mut nar_buf = writer.inner;
 
-    // Rewind the buffers's cursor to let the cache read its contents from the
+    // Rewind the buffer's cursor to let the cache read its contents from the
     // beginning.
     nar_buf
         .seek(io::SeekFrom::Start(0))
         .await
-        .map_err(HandlePathError::RewindTempFile)?;
+        .map_err(HandlePathError::RewindNarBuffer)?;
 
     // Just like `nix copy --to`, we write the NAR *before* the NARInfo to avoid
     // the cache server temporarily reporting false positives.
@@ -346,9 +367,7 @@ async fn handle_store_path<C: Cache, H: HttpClient, N: Nix>(
         .await
         .map_err(HandlePathError::UploadNar)?;
 
-    let get_narinfo = async {
-        let mut infos = nix.get_path_infos(store_path).await?;
-
+    let narinfo = || -> Result<_, N::PathInfosError> {
         Ok(NarInfo {
             store_path: store_path.clone(),
             url: (),
@@ -356,15 +375,14 @@ async fn handle_store_path<C: Cache, H: HttpClient, N: Nix>(
             file_hash,
             file_size,
             nar_hash: infos.nar_hash()?,
-            nar_size: infos.nar_size()?,
+            nar_size,
             references: infos.references()?.into_iter().collect(),
             deriver: infos.deriver()?,
             signatures: infos.signatures()?.into_iter().collect(),
             content_address: infos.content_address()?,
         })
-    };
-
-    let narinfo = get_narinfo.await.map_err(HandlePathError::GetPathInfos)?;
+    }()
+    .map_err(HandlePathError::GetPathInfos)?;
 
     let narinfo_size = cache
         .upload_narinfo(narinfo_filename, narinfo)
