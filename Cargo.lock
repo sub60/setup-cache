@@ -639,18 +639,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fallible-iterator"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
-
-[[package]]
-name = "fallible-streaming-iterator"
-version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
-
-[[package]]
 name = "fastrand"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -688,12 +676,6 @@ name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
-
-[[package]]
-name = "foldhash"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "form_urlencoded"
@@ -856,27 +838,9 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
-version = "0.16.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
-dependencies = [
- "foldhash",
-]
-
-[[package]]
-name = "hashbrown"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4f467dd6dccf739c208452f8014c75c18bb8301b050ad1cfb27153803edb0f51"
-
-[[package]]
-name = "hashlink"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea0b22561a9c04a7cb1a302c013e0259cd3b4bb619f145b32f72b8b4bcbed230"
-dependencies = [
- "hashbrown 0.16.1",
-]
 
 [[package]]
 name = "heck"
@@ -1104,7 +1068,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
 dependencies = [
  "equivalent",
- "hashbrown 0.17.0",
+ "hashbrown",
 ]
 
 [[package]]
@@ -1208,33 +1172,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48f5d2a454e16a5ea0f4ced81bd44e4cfc7bd3a507b61887c99fd3538b28e4af"
 
 [[package]]
-name = "libloading"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
-dependencies = [
- "cfg-if",
- "windows-link",
-]
-
-[[package]]
 name = "libmimalloc-sys"
 version = "0.1.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bc89deee4af0429081d2a518c0431ae068222a5a262a3bc6ff4d8535ec2e02fe"
 dependencies = [
  "cc",
-]
-
-[[package]]
-name = "libsqlite3-sys"
-version = "0.36.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95b4103cffefa72eb8428cb6b47d6627161e51c2739fc5e3b734584157bc642a"
-dependencies = [
- "cc",
- "pkg-config",
- "vcpkg",
 ]
 
 [[package]]
@@ -1348,9 +1291,9 @@ dependencies = [
 [[package]]
 name = "nixb"
 version = "0.1.0"
-source = "git+https://github.com/noib3/nixb?branch=store-path-info#08097085ea24dc1227c37a32972bc004223bf7f7"
+source = "git+https://github.com/noib3/nixb?branch=store-path-info#64481e1549826defe64e5539b337693d7a3f0c35"
 dependencies = [
- "nixb-contexts",
+ "nixb-c-context",
  "nixb-error",
  "nixb-expr",
  "nixb-plugin",
@@ -1358,9 +1301,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "nixb-contexts"
+name = "nixb-c-context"
 version = "0.1.0"
-source = "git+https://github.com/noib3/nixb?branch=store-path-info#08097085ea24dc1227c37a32972bc004223bf7f7"
+source = "git+https://github.com/noib3/nixb?branch=store-path-info#64481e1549826defe64e5539b337693d7a3f0c35"
 dependencies = [
  "nixb-error",
  "nixb-sys",
@@ -1369,7 +1312,7 @@ dependencies = [
 [[package]]
 name = "nixb-cpp"
 version = "0.1.0"
-source = "git+https://github.com/noib3/nixb?branch=store-path-info#08097085ea24dc1227c37a32972bc004223bf7f7"
+source = "git+https://github.com/noib3/nixb?branch=store-path-info#64481e1549826defe64e5539b337693d7a3f0c35"
 dependencies = [
  "cc",
  "nixb-sys",
@@ -1379,7 +1322,7 @@ dependencies = [
 [[package]]
 name = "nixb-error"
 version = "0.1.0"
-source = "git+https://github.com/noib3/nixb?branch=store-path-info#08097085ea24dc1227c37a32972bc004223bf7f7"
+source = "git+https://github.com/noib3/nixb?branch=store-path-info#64481e1549826defe64e5539b337693d7a3f0c35"
 dependencies = [
  "nixb-sys",
 ]
@@ -1387,9 +1330,9 @@ dependencies = [
 [[package]]
 name = "nixb-expr"
 version = "0.1.0"
-source = "git+https://github.com/noib3/nixb?branch=store-path-info#08097085ea24dc1227c37a32972bc004223bf7f7"
+source = "git+https://github.com/noib3/nixb?branch=store-path-info#64481e1549826defe64e5539b337693d7a3f0c35"
 dependencies = [
- "nixb-contexts",
+ "nixb-c-context",
  "nixb-cpp",
  "nixb-error",
  "nixb-macros",
@@ -1400,7 +1343,7 @@ dependencies = [
 [[package]]
 name = "nixb-macros"
 version = "0.1.0"
-source = "git+https://github.com/noib3/nixb?branch=store-path-info#08097085ea24dc1227c37a32972bc004223bf7f7"
+source = "git+https://github.com/noib3/nixb?branch=store-path-info#64481e1549826defe64e5539b337693d7a3f0c35"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1410,23 +1353,20 @@ dependencies = [
 [[package]]
 name = "nixb-plugin"
 version = "0.1.0"
-source = "git+https://github.com/noib3/nixb?branch=store-path-info#08097085ea24dc1227c37a32972bc004223bf7f7"
+source = "git+https://github.com/noib3/nixb?branch=store-path-info#64481e1549826defe64e5539b337693d7a3f0c35"
 dependencies = [
- "libc",
- "libloading",
- "memchr",
+ "nixb-c-context",
  "nixb-expr",
  "nixb-macros",
  "nixb-sys",
- "rusqlite",
 ]
 
 [[package]]
 name = "nixb-store"
 version = "0.1.0"
-source = "git+https://github.com/noib3/nixb?branch=store-path-info#08097085ea24dc1227c37a32972bc004223bf7f7"
+source = "git+https://github.com/noib3/nixb?branch=store-path-info#64481e1549826defe64e5539b337693d7a3f0c35"
 dependencies = [
- "nixb-contexts",
+ "nixb-c-context",
  "nixb-cpp",
  "nixb-error",
  "nixb-sys",
@@ -1435,7 +1375,7 @@ dependencies = [
 [[package]]
 name = "nixb-sys"
 version = "0.1.0"
-source = "git+https://github.com/noib3/nixb?branch=store-path-info#08097085ea24dc1227c37a32972bc004223bf7f7"
+source = "git+https://github.com/noib3/nixb?branch=store-path-info#64481e1549826defe64e5539b337693d7a3f0c35"
 
 [[package]]
 name = "nom"
@@ -1721,31 +1661,6 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "rsqlite-vfs"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a8a1f2315036ef6b1fbacd1972e8ee7688030b0a2121edfc2a6550febd41574d"
-dependencies = [
- "hashbrown 0.16.1",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "rusqlite"
-version = "0.38.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1c93dd1c9683b438c392c492109cb702b8090b2bfc8fed6f6e4eb4523f17af3"
-dependencies = [
- "bitflags",
- "fallible-iterator",
- "fallible-streaming-iterator",
- "hashlink",
- "libsqlite3-sys",
- "smallvec",
- "sqlite-wasm-rs",
 ]
 
 [[package]]
@@ -2071,18 +1986,6 @@ checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
 dependencies = [
  "base64ct",
  "der",
-]
-
-[[package]]
-name = "sqlite-wasm-rs"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f4206ed3a67690b9c29b77d728f6acc3ce78f16bf846d83c94f76400320181b"
-dependencies = [
- "cc",
- "js-sys",
- "rsqlite-vfs",
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -2473,12 +2376,6 @@ name = "utf8parse"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
-
-[[package]]
-name = "vcpkg"
-version = "0.2.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "version_check"

@@ -1,9 +1,10 @@
 use core::ffi::CStr;
 use core::num::NonZeroU64;
 use core::ops::ControlFlow;
-use std::ffi::OsString;
+use std::collections::{BTreeMap, btree_map};
+use std::ffi::{OsStr, OsString};
 use std::io;
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
@@ -26,6 +27,7 @@ use crate::protocol::StoreDir;
 #[derive(Clone)]
 pub(crate) struct NixStore {
     store: nixb::store::Store,
+    use_case_hack: bool,
 }
 
 trait StorePathExt {
@@ -34,10 +36,21 @@ trait StorePathExt {
 
 impl NixStore {
     pub(crate) fn open() -> nixb::Result<Self> {
-        let mut ctx = nixb::contexts::c_context::CContext::create();
-        let init = nixb::store::init::<true>(&mut ctx)?;
-        let store = nixb::store::Store::open(init, c"", [], ctx)?;
-        Ok(Self { store })
+        let mut init = nixb::store::init::<true>()?;
+        let use_case_hack = nixb::store::get_setting(
+            c"use-case-hack",
+            |value| match value {
+                b"true" => Ok(true),
+                b"false" => Ok(false),
+                value => Err(nixb::Error::from_message(format_args!(
+                    "unexpected value for use-case-hack: {:?}",
+                    String::from_utf8_lossy(value)
+                ))),
+            },
+            &mut init,
+        )??;
+        let store = nixb::store::Store::open(init, c"", [])?;
+        Ok(Self { store, use_case_hack })
     }
 
     fn parse_path(
@@ -76,7 +89,7 @@ impl context::Nix for NixStore {
         let store_path = store_path.to_string();
         let mut writer = async_compat::Compat::new(buf);
         let root = nar_writer::open(&mut writer).await?;
-        write_nar(root, Path::new(&store_path)).await?;
+        write_nar(root, Path::new(&store_path), self.use_case_hack).await?;
         Ok(())
     }
 
@@ -226,6 +239,7 @@ fn signature_from_bytes(bytes: &[u8]) -> nixb::Result<Signature> {
 async fn write_nar(
     node: nar_writer::Node<'_, '_>,
     node_path: &Path,
+    use_case_hack: bool,
 ) -> io::Result<()> {
     let metadata = fs::symlink_metadata(node_path).await?;
     let file_type = metadata.file_type();
@@ -233,10 +247,12 @@ async fn write_nar(
     if file_type.is_dir() {
         let mut directory = node.directory().await?;
         let mut child_path = node_path.to_owned();
-        for child_name in read_dir_entries(node_path).await? {
-            let child = directory.entry(child_name.as_bytes()).await?;
-            child_path.push(&child_name);
-            Box::pin(write_nar(child, &child_path)).await?;
+        for (nar_name, file_name) in
+            read_dir_entries(node_path, use_case_hack).await?
+        {
+            let child = directory.entry(nar_name.as_bytes()).await?;
+            child_path.push(&file_name);
+            Box::pin(write_nar(child, &child_path, use_case_hack)).await?;
             child_path.pop();
         }
         return directory.close().await;
@@ -260,14 +276,88 @@ async fn write_nar(
     ))
 }
 
-/// Returns the file names of the children of the directory at the given path,
-/// sorted lexicographically.
-async fn read_dir_entries(dir_path: &Path) -> io::Result<Vec<OsString>> {
+/// Returns a map from each child's logical NAR name to its file name, sorted by
+/// logical name.
+///
+/// The file name is the directory entry that exists on disk and is used to open
+/// the child, while the logical name is the name written to the NAR, which
+/// contributes to the NAR's canonical contents and hash. These are normally
+/// identical.
+///
+/// When `use-case-hack` is enabled, Nix can store names that differ only in
+/// casing onto a case-insensitive filesystem – such as the default macOS
+/// filesystem – by appending `~nix~case~hack~<number>` to colliding file names.
+/// When dumping the path again, that suffix must be removed to recover the
+/// original logical NAR name while the suffixed file name is retained for
+/// filesystem access.
+async fn read_dir_entries(
+    dir_path: &Path,
+    use_case_hack: bool,
+) -> io::Result<BTreeMap<OsString, OsString>> {
     let mut read_dir = fs::read_dir(dir_path).await?;
-    let mut file_names = vec![];
+    let mut entries = BTreeMap::new();
     while let Some(entry) = read_dir.next_entry().await? {
-        file_names.push(entry.file_name());
+        let file_name = entry.file_name();
+        let logical_name = logical_name(&file_name, use_case_hack);
+        match entries.entry(logical_name) {
+            btree_map::Entry::Vacant(entry) => {
+                entry.insert(file_name);
+            },
+            btree_map::Entry::Occupied(entry) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "file name collision between {:?} and {file_name:?} \
+                         after decoding Nix's case hack",
+                        entry.get(),
+                    ),
+                ));
+            },
+        }
     }
-    file_names.sort();
-    Ok(file_names)
+    Ok(entries)
+}
+
+fn logical_name(file_name: &OsStr, use_case_hack: bool) -> OsString {
+    const CASE_HACK_SUFFIX: &[u8] = b"~nix~case~hack~";
+
+    let bytes = file_name.as_bytes();
+
+    if use_case_hack
+        && let Some(suffix_start) =
+            memchr::memmem::find(bytes, CASE_HACK_SUFFIX)
+    {
+        OsString::from_vec(bytes[..suffix_start].to_vec())
+    } else {
+        file_name.to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_case_hack_suffix() {
+        let file_name = OsStr::from_bytes(b"pod~nix~case~hack~1");
+
+        assert_eq!(logical_name(file_name, true).as_bytes(), b"pod");
+        assert_eq!(
+            logical_name(file_name, false).as_bytes(),
+            file_name.as_bytes(),
+        );
+    }
+
+    #[test]
+    fn rejects_case_hack_name_collisions() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("pod"), []).unwrap();
+        std::fs::write(dir.path().join("pod~nix~case~hack~1"), []).unwrap();
+
+        let runtime = ::tokio::runtime::Runtime::new().unwrap();
+        let error =
+            runtime.block_on(read_dir_entries(dir.path(), true)).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
 }
