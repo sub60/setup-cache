@@ -9,7 +9,7 @@ use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::{Bytes, BytesMut};
-use futures::AsyncRead;
+use futures::{AsyncRead, FutureExt};
 use nix_types::{NarFileName, NarInfo, NarInfoFileName};
 use reqwest::{Method, StatusCode, header};
 use smallvec::SmallVec;
@@ -27,6 +27,7 @@ use crate::async_read_ext::AsyncReadExt;
 use crate::context;
 use crate::protocol::StoreDir;
 use crate::run::RunArgs;
+use crate::tokio::TokioSpawner;
 
 type AuthToken = String;
 
@@ -37,6 +38,7 @@ static SUB60_CACHE_URL: LazyLock<url::Url> =
 pub(crate) struct Sub60Cache {
     cache_url: url::Url,
     client: reqwest::Client,
+    spawner: TokioSpawner,
 }
 
 #[derive(Debug, clap::Args)]
@@ -129,6 +131,7 @@ impl Sub60Cache {
     /// TODO: docs.
     pub(crate) async fn connect(
         RunArgs { sub60_cache_args: args, .. }: &RunArgs,
+        spawner: TokioSpawner,
     ) -> Result<Self, Sub60CacheConnectError> {
         let mut cache_url = SUB60_CACHE_URL.clone();
         cache_url
@@ -141,7 +144,7 @@ impl Sub60Cache {
             .build()
             .map_err(Sub60CacheConnectError::BuildHttpClient)?;
 
-        Ok(Self { cache_url, client })
+        Ok(Self { cache_url, client, spawner })
     }
 
     async fn initiate_multipart_nar_upload(
@@ -432,27 +435,46 @@ impl CacheRequestError {
 impl context::Cache for Sub60Cache {
     type Error = CacheRequestError;
 
-    async fn has_narinfo(
+    fn has_narinfo(
         &self,
         narinfo_filename: &NarInfoFileName,
-    ) -> Result<bool, Self::Error> {
+    ) -> impl Future<Output = Result<bool, Self::Error>> + Send {
         let url = self.narinfo_url(narinfo_filename);
 
-        let response =
-            self.client.head(url.clone()).send().await.map_err(|source| {
-                CacheRequestError::HttpRequest { method: Method::HEAD, source }
-            })?;
+        #[expect(clippy::result_large_err)]
+        let future =
+            self.client.head(url.clone()).send().map(
+                move |result| match result.map(|resp| resp.status()) {
+                    Ok(StatusCode::OK) => Ok(true),
+                    Ok(StatusCode::NOT_FOUND) => Ok(false),
+                    Ok(status) => Err(CacheRequestError::UnexpectedResponse {
+                        method: Method::HEAD,
+                        status,
+                        url,
+                        body: String::new(),
+                    }),
+                    Err(source) => Err(CacheRequestError::HttpRequest {
+                        method: Method::HEAD,
+                        source,
+                    }),
+                },
+            );
 
-        match response.status() {
-            StatusCode::OK => Ok(true),
-            StatusCode::NOT_FOUND => Ok(false),
-            _ => Err(CacheRequestError::unexpected_response(
-                response,
-                Method::HEAD,
-                url,
-            )
-            .await),
-        }
+        // The caller will race this NARInfo lookup against the upstream caches
+        // and intentionally drops the losing future. Dropping an in-flight
+        // HTTP/2 request causes reqwest to terminate the corresponding stream
+        // by sending an RST_STREAM frame. When handling many paths in rapid
+        // succession, if the upstream lookups repeatedly win their races, this
+        // produces a burst of resets on the single multiplexed connection to
+        // cache.sub60.dev. Cloudflare treats that pattern as an HTTP/2 Rapid
+        // Reset attack and closes the entire connection, taking unrelated
+        // NARInfo lookups down with it (see
+        // <https://blog.cloudflare.com/technical-breakdown-http2-rapid-reset-ddos-attack/>
+        // for details).
+        //
+        // To prevent this, we let the lookup run to completion even if the
+        // caller drops the future.
+        self.spawner.run_to_completion(future)
     }
 
     async fn upload_nar(

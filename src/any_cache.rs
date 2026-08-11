@@ -8,6 +8,7 @@ use crate::noop_cache::NoopCache;
 use crate::protocol::StoreDir;
 use crate::run::RunArgs;
 use crate::sub60_cache::{Sub60Cache, Sub60CacheConnectError};
+use crate::tokio::TokioSpawner;
 
 #[derive(Clone)]
 pub(crate) enum AnyCache {
@@ -32,11 +33,12 @@ pub(crate) enum AnyCacheError {
 impl AnyCache {
     pub(crate) async fn new(
         args: &RunArgs,
+        spawner: TokioSpawner,
     ) -> Result<Self, Sub60CacheConnectError> {
         match args.cache {
             AnyCacheKind::Noop => Ok(NoopCache::default().into()),
             AnyCacheKind::Sub60 => {
-                Sub60Cache::connect(args).await.map(Into::into)
+                Sub60Cache::connect(args, spawner).await.map(Into::into)
             },
         }
     }

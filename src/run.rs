@@ -104,13 +104,14 @@ async fn start(
     let nix_store = NixStore::open().map_err(StartError::OpenNixStore)?;
 
     #[cfg(not(feature = "sub60-cache"))]
-    let cache = crate::any_cache::AnyCache::new(&args)
+    let cache = crate::any_cache::AnyCache::new(&args, spawner.clone())
         .await
         .map_err(StartError::ConnectToCache)?;
 
     #[cfg(feature = "sub60-cache")]
-    let cache =
-        Sub60Cache::connect(&args).await.map_err(StartError::ConnectToCache)?;
+    let cache = Sub60Cache::connect(&args, spawner.clone())
+        .await
+        .map_err(StartError::ConnectToCache)?;
 
     let mut ctx = RealContext::new(nix_store, spawner);
 
