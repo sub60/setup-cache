@@ -415,15 +415,16 @@ const main = async () => {
     const assetName = `${BINARY_NAME}-${target}.gz`;
     const actionRef =
       core.getInput("action-ref") || requiredEnv("GITHUB_ACTION_REF");
+    const releaseRef = actionRef === "main" ? "pre-release" : actionRef;
 
-    const assetRequest = isCommitSha(actionRef)
+    const assetRequest = isCommitSha(releaseRef)
       ? await githubApiReleaseAssetRequest(
           releaseRepository,
-          actionRef,
+          releaseRef,
           assetName,
           githubToken,
         )
-      : directReleaseAssetRequest(releaseRepository, actionRef, assetName);
+      : directReleaseAssetRequest(releaseRepository, releaseRef, assetName);
 
     core.info(`Downloading '${assetName}' from '${assetRequest.url}'`);
     await downloadGzipFile(assetRequest.url, binaryPath, assetRequest.headers);
