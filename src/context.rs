@@ -45,13 +45,17 @@ pub trait Cache: Clone + Send + Sync + 'static {
         narinfo_filename: &NarInfoFileName,
     ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
 
+    /// Uploads a NAR and returns the number of bytes added to the cache. Returns
+    /// zero if an equivalent NAR was already present.
     fn upload_nar(
         &self,
         nar_file_name: NarFileName,
         nar_size: NonZeroU64,
         nar_bytes: impl AsyncRead + Send + 'static,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    ) -> impl Future<Output = Result<u64, Self::Error>> + Send;
 
+    /// Uploads a NARInfo and returns the number of bytes added to the cache.
+    /// Returns zero if an equivalent NARInfo was already present.
     fn upload_narinfo(
         &self,
         narinfo_filename: NarInfoFileName,

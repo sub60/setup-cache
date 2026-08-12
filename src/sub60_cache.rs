@@ -189,7 +189,7 @@ impl Sub60Cache {
         nar_file_name: NarFileName,
         upload_id: &UploadId,
         etags: SmallVec<[Etag; 8]>,
-    ) -> Result<(), CacheRequestError> {
+    ) -> Result<bool, CacheRequestError> {
         let url = self.nar_multiparts_complete_url(upload_id);
 
         let response = self
@@ -203,15 +203,15 @@ impl Sub60Cache {
                 source,
             })?;
 
-        if response.status().is_success() {
-            Ok(())
-        } else {
-            Err(CacheRequestError::unexpected_response(
+        match response.status() {
+            StatusCode::CREATED => Ok(true),
+            StatusCode::OK => Ok(false),
+            _ => Err(CacheRequestError::unexpected_response(
                 response,
                 Method::POST,
                 url,
             )
-            .await)
+            .await),
         }
     }
 
@@ -480,9 +480,9 @@ impl context::Cache for Sub60Cache {
     async fn upload_nar(
         &self,
         nar_file_name: NarFileName,
-        _nar_size: NonZeroU64,
+        nar_size: NonZeroU64,
         nar_bytes: impl AsyncRead + Send + 'static,
-    ) -> Result<(), Self::Error> {
+    ) -> Result<u64, Self::Error> {
         let initiate_body =
             self.initiate_multipart_nar_upload(&nar_file_name).await?;
 
@@ -490,12 +490,15 @@ impl context::Cache for Sub60Cache {
             .upload_nar_multiparts(&nar_file_name, &initiate_body, nar_bytes)
             .await?;
 
-        self.complete_multipart_nar_upload(
-            nar_file_name,
-            &initiate_body.upload_id,
-            etags,
-        )
-        .await
+        let did_insert = self
+            .complete_multipart_nar_upload(
+                nar_file_name,
+                &initiate_body.upload_id,
+                etags,
+            )
+            .await?;
+
+        Ok(if did_insert { nar_size.get() } else { 0 })
     }
 
     async fn upload_narinfo(
@@ -517,15 +520,15 @@ impl context::Cache for Sub60Cache {
                 },
             )?;
 
-        if response.status().is_success() {
-            Ok(narinfo_size)
-        } else {
-            Err(CacheRequestError::unexpected_response(
+        match response.status() {
+            StatusCode::CREATED => Ok(narinfo_size),
+            StatusCode::OK => Ok(0),
+            _ => Err(CacheRequestError::unexpected_response(
                 response,
                 Method::PUT,
                 url,
             )
-            .await)
+            .await),
         }
     }
 }

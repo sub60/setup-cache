@@ -66,7 +66,7 @@ impl Cache for AnyCache {
         nar_file_name: NarFileName,
         nar_size: NonZeroU64,
         nar_bytes: impl AsyncRead + Send + 'static,
-    ) -> Result<(), Self::Error> {
+    ) -> Result<u64, Self::Error> {
         match self {
             Self::Noop(cache) => cache
                 .upload_nar(nar_file_name, nar_size, nar_bytes)

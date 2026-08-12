@@ -25,10 +25,9 @@ impl Cache for NoopCache {
         _: NarFileName,
         _: NonZeroU64,
         nar_bytes: impl AsyncRead + Send + 'static,
-    ) -> Result<(), Self::Error> {
+    ) -> Result<u64, Self::Error> {
         let mut sink = futures::io::sink();
-        futures::io::copy(nar_bytes, &mut sink).await.expect("never fails");
-        Ok(())
+        Ok(futures::io::copy(nar_bytes, &mut sink).await.expect("never fails"))
     }
 
     async fn upload_narinfo(

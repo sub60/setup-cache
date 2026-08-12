@@ -362,7 +362,7 @@ async fn handle_store_path<C: Cache, H: HttpClient, N: Nix>(
     // Just like `nix copy --to`, we write the NAR *before* the NARInfo to avoid
     // the cache server temporarily reporting false positives.
 
-    cache
+    let nar_size_pushed = cache
         .upload_nar(nar_file_name, file_size, nar_buf)
         .await
         .map_err(HandlePathError::UploadNar)?;
@@ -389,7 +389,7 @@ async fn handle_store_path<C: Cache, H: HttpClient, N: Nix>(
         .await
         .map_err(HandlePathError::UploadNarInfo)?;
 
-    Ok(Some(file_size.saturating_add(narinfo_size)))
+    Ok(NonZeroU64::new(nar_size_pushed.saturating_add(narinfo_size)))
 }
 
 async fn should_push_store_path<C: Cache, H: HttpClient>(
