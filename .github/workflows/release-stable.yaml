@@ -1,4 +1,4 @@
-name: Publish a stable release
+name: publish stable release
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    name: Build for ${{ matrix.package }}
+    name: build for ${{ matrix.package }}
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -26,8 +26,21 @@ jobs:
       - name: Install Nix
         uses: NixOS/nix-installer-action@main
 
+      - name: Setup SSH keys for private flake inputs
+        uses: webfactory/ssh-agent@v0.9.1
+        with:
+          ssh-private-key: ${{ secrets.NOIB3_NIX_JETTISON_SSH_KEY }}
+
+      # This uses the current pre-release, so don't let a broken one prevent us
+      # from publishing a release.
+      - name: Setup Nix cache
+        uses: sub60/setup-cache@main
+        continue-on-error: true
+        with:
+          auth-token: token
+
       - name: Build package
-        run: nix build ".#${{ matrix.package }}"
+        run: nix build --accept-flake-config ".#${{ matrix.package }}"
 
       - name: Stage artifact
         run: |
@@ -42,7 +55,7 @@ jobs:
           if-no-files-found: error
 
   release-stable:
-    name: Publish stable release
+    name: publish stable release
     needs: build
     runs-on: ubuntu-latest
     permissions:

@@ -1,4 +1,4 @@
-name: Publish a pre-release
+name: publish pre-release
 
 on:
   push:
@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   check-tag:
-    name: Check for a version tag
+    name: check for a version tag
     runs-on: ubuntu-latest
     outputs:
       is_tagged: ${{ steps.check.outputs.is_tagged }}
@@ -34,7 +34,7 @@ jobs:
           echo "is_tagged=$is_tagged" >> "$GITHUB_OUTPUT"
 
   build:
-    name: Build for ${{ matrix.package }}
+    name: build for ${{ matrix.package }}
     needs: check-tag
     if: needs.check-tag.outputs.is_tagged == 'false'
     runs-on: ${{ matrix.runner }}
@@ -55,8 +55,21 @@ jobs:
       - name: Install Nix
         uses: NixOS/nix-installer-action@main
 
+      - name: Setup SSH keys for private flake inputs
+        uses: webfactory/ssh-agent@v0.9.1
+        with:
+          ssh-private-key: ${{ secrets.NOIB3_NIX_JETTISON_SSH_KEY }}
+
+      # This uses the current pre-release, so don't let a broken one prevent us
+      # from publishing its fix.
+      - name: Setup Nix cache
+        uses: sub60/setup-cache@main
+        continue-on-error: true
+        with:
+          auth-token: token
+
       - name: Build package
-        run: nix build ".#${{ matrix.package }}"
+        run: nix build --accept-flake-config ".#${{ matrix.package }}"
 
       - name: Stage artifact
         run: |
@@ -71,7 +84,7 @@ jobs:
           if-no-files-found: error
 
   release-dev:
-    name: Publish pre-release
+    name: publish pre-release
     needs:
       - check-tag
       - build

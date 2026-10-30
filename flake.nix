@@ -1,6 +1,6 @@
 {
   inputs = {
-    crane.url = "github:ipetkov/crane";
+    nix-jettison.url = "git+ssh://git@github.com/noib3/nix-jettison.git";
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
@@ -15,7 +15,7 @@
   outputs =
     {
       self,
-      crane,
+      nix-jettison,
       nixpkgs,
       rust-overlay,
       treefmt-nix,
@@ -38,8 +38,6 @@
           {
             targets = [ pkgs.stdenv.targetPlatform.rust.rustcTarget ];
           };
-
-      mkCraneLib = pkgs: (crane.mkLib pkgs).overrideToolchain mkToolchain;
 
       mkBuildInputs =
         pkgs:
@@ -167,32 +165,21 @@
           rewrite_iconv_flags NIX_LDFLAGS_FOR_BUILD
         '';
 
+      mkWorkspace =
+        pkgs:
+        import ./nix/workspace.nix {
+          inherit pkgs self nix-jettison;
+          nixLibraries = mkBuildInputs pkgs;
+          staticLinkEnvHook = mkStaticLinkEnvHook pkgs;
+          toolchain = mkToolchain pkgs;
+        };
+
       mkPackage =
         pkgs:
-        let
-          craneLib = mkCraneLib pkgs;
-          src = craneLib.cleanCargoSource ./.;
-          commonArgs = {
-            inherit src;
-            cargoVendorDir = craneLib.vendorCargoDeps { inherit src; };
-            strictDeps = true;
-            doCheck = false;
-            buildInputs = mkBuildInputs pkgs;
-            nativeBuildInputs = [ pkgs.buildPackages.pkg-config ];
-            preBuild = mkStaticLinkEnvHook pkgs;
-            env = {
-              PKG_CONFIG_ALL_STATIC = "1";
-            };
-          };
-          cargoArtifacts = craneLib.buildDepsOnly commonArgs;
-        in
-        craneLib.buildPackage (
-          commonArgs
-          // {
-            inherit cargoArtifacts;
-            cargoExtraArgs = "--features sub60-cache";
-          }
-        );
+        (mkWorkspace pkgs).rootPackage.build.override {
+          binaries = true;
+          features = [ "sub60-cache" ];
+        };
 
       mkTreefmt =
         pkgs:
@@ -283,8 +270,27 @@
 
       checks = forEachSystem (
         _system: pkgs: {
+          clippy = (mkWorkspace pkgs).clippy.override {
+            allFeatures = true;
+            allTargets = true;
+            clippyArgs = [
+              "-D"
+              "warnings"
+            ];
+          };
           formatting = (mkTreefmt pkgs).config.build.check self;
         }
       );
     };
+
+  nixConfig = {
+    extra-substituters = [
+      "https://cache.sub60.dev/sub60/setup-cache"
+      "https://cache.sub60.dev/noib3/nix-jettison"
+    ];
+    extra-trusted-public-keys = [
+      "cache.sub60.dev/sub60/setup-cache-1:eLhgNfgMDRVlQ9EpHGWujSfjLZg21EGTd+lDCOuV0jY="
+      "cache.sub60.dev/noib3/nix-jettison-1:yFjuL2ZV5kv1FDUlU76T6yEh6/i7Ud3qF+QxgdZt0Ko="
+    ];
+  };
 }
