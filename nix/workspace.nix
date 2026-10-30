@@ -4,7 +4,6 @@
   self,
   nix-jettison,
   nixLibraries,
-  staticLinkEnvHook,
   toolchain,
 }:
 
@@ -14,12 +13,10 @@ let
     pkgs': args:
     args
     // {
-      nativeBuildInputs = (args.nativeBuildInputs or [ ]) ++ [
-        pkgs'.buildPackages.pkg-config
-      ];
-      buildInputs = (args.buildInputs or [ ]) ++ nixLibraries;
-      env = args.env // {
-        PKG_CONFIG_ALL_STATIC = "1";
+      buildScript = args.buildScript // {
+        nativeBuildInputs = [ pkgs'.pkg-config ];
+        buildInputs = nixLibraries;
+        env.PKG_CONFIG_ALL_STATIC = "1";
       };
     };
 in
@@ -27,12 +24,7 @@ nix-jettison.lib.loadWorkspace {
   inherit pkgs toolchain;
   src = self;
   crateOverrides = pkgs': {
-    cache-action =
-      args:
-      withNixLibraries pkgs' args
-      // {
-        preBuild = (args.preBuild or "") + staticLinkEnvHook;
-      };
+    cache-action = withNixLibraries pkgs';
     nixb-cpp = withNixLibraries pkgs';
   };
 }

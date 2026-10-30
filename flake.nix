@@ -170,7 +170,6 @@
         import ./nix/workspace.nix {
           inherit pkgs self nix-jettison;
           nixLibraries = mkBuildInputs pkgs;
-          staticLinkEnvHook = mkStaticLinkEnvHook pkgs;
           toolchain = mkToolchain pkgs;
         };
 
