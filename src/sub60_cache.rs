@@ -147,10 +147,12 @@ impl Sub60Cache {
         Ok(Self { cache_url, client, spawner })
     }
 
+    /// Initiates a multipart upload for the given NAR, returning `None` if the
+    /// cache already contains it.
     async fn initiate_multipart_nar_upload(
         &self,
         nar_file_name: &NarFileName,
-    ) -> Result<NarMultipartsResponseBody, CacheRequestError> {
+    ) -> Result<Option<NarMultipartsResponseBody>, CacheRequestError> {
         let url = self.nar_multiparts_url();
 
         let response = self
@@ -164,13 +166,17 @@ impl Sub60Cache {
                 source,
             })?;
 
-        if !response.status().is_success() {
-            return Err(CacheRequestError::unexpected_response(
-                response,
-                Method::POST,
-                url,
-            )
-            .await);
+        match response.status() {
+            StatusCode::OK => {},
+            StatusCode::NO_CONTENT => return Ok(None),
+            _ => {
+                return Err(CacheRequestError::unexpected_response(
+                    response,
+                    Method::POST,
+                    url,
+                )
+                .await);
+            },
         }
 
         response
@@ -181,6 +187,7 @@ impl Sub60Cache {
                 source,
             })?
             .parse::<NarMultipartsResponseBody>()
+            .map(Some)
             .map_err(CacheRequestError::ParseNarMultipartsResponseBody)
     }
 
@@ -483,8 +490,11 @@ impl context::Cache for Sub60Cache {
         nar_size: NonZeroU64,
         nar_bytes: impl AsyncRead + Send + 'static,
     ) -> Result<u64, Self::Error> {
-        let initiate_body =
-            self.initiate_multipart_nar_upload(&nar_file_name).await?;
+        let Some(initiate_body) =
+            self.initiate_multipart_nar_upload(&nar_file_name).await?
+        else {
+            return Ok(0);
+        };
 
         let etags = self
             .upload_nar_multiparts(&nar_file_name, &initiate_body, nar_bytes)
