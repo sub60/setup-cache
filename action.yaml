@@ -3,8 +3,8 @@ name: "sub60's cache action"
 description: "Sets up and drains the sub60 Nix cache uploader"
 
 inputs:
-  user:
-    description: "The sub60 cache user"
+  namespace:
+    description: "The sub60 namespace containing the cache"
     required: false
     default: ${{ github.repository_owner }}
   cache:

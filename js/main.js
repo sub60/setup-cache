@@ -383,7 +383,7 @@ const parseUpstreamCaches = (input) => {
  * @returns {Promise<void>}
  */
 const main = async () => {
-  const user = core.getInput("user", { required: true });
+  const namespace = core.getInput("namespace", { required: true });
   const cache = core.getInput("cache", { required: true });
   const authToken = core.getInput("auth-token", { required: true });
   const upstreamCaches = parseUpstreamCaches(core.getInput("upstream-caches"));
@@ -450,8 +450,8 @@ const main = async () => {
       "3",
       "--auth-token",
       authToken,
-      "--user",
-      user,
+      "--namespace",
+      namespace,
       "--cache",
       cache,
     ];

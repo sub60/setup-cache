@@ -21,7 +21,7 @@ use sub60_cache::nar_multiparts::{
     PartsResponseBody,
     UploadId,
 };
-use sub60_cache::{CacheName, UserName};
+use sub60_cache::{CacheName, NamespaceName};
 
 use crate::async_read_ext::AsyncReadExt;
 use crate::context;
@@ -44,7 +44,7 @@ pub(crate) struct Sub60Cache {
 #[derive(Debug, clap::Args)]
 pub(crate) struct Sub60CacheRunArgs {
     #[arg(long)]
-    user: UserName,
+    namespace: NamespaceName,
     #[arg(long)]
     cache: CacheName,
     #[arg(long)]
@@ -137,7 +137,7 @@ impl Sub60Cache {
         cache_url
             .path_segments_mut()
             .expect("cache URL can be a base")
-            .push(&args.user)
+            .push(&args.namespace)
             .push(&args.cache);
 
         let client = reqwest::Client::builder()
