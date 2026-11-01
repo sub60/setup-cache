@@ -6,6 +6,7 @@ mod any_cache;
 mod async_read_ext;
 mod context;
 mod event_loop;
+mod nar;
 mod nix_store;
 #[cfg(not(feature = "sub60-cache"))]
 mod noop_cache;
