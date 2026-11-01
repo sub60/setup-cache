@@ -1,6 +1,6 @@
 [package]
 name = "cache-action"
-version = "0.0.20-pre"
+version = "0.0.20"
 edition = "2024"
 
 [features]
