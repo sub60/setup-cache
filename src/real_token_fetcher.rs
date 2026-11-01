@@ -52,8 +52,8 @@ pub(crate) struct GitHubActions {
     /// The bearer token authenticating requests for the job's OIDC tokens.
     oidc_token_request_token: String,
 
-    /// The URL of the cache's server.
-    server_url: url::Url,
+    /// The origin of the cache's server.
+    origin: url::Url,
 }
 
 #[derive(Debug, derive_more::Display, cauchy::Error)]
@@ -104,7 +104,7 @@ struct OidcTokenResponseBody {
 impl RealTokenFetcher {
     pub(crate) fn new(
         args: &RealTokenFetcherArgs,
-        server_url: url::Url,
+        origin: url::Url,
     ) -> Result<Self, NewRealTokenFetcherError> {
         match args {
             RealTokenFetcherArgs { token: Some(token), .. } => {
@@ -122,7 +122,7 @@ impl RealTokenFetcher {
                     .map_err(NewRealTokenFetcherError::BuildHttpClient)?,
                 oidc_token_request_url: url.clone(),
                 oidc_token_request_token: token.clone(),
-                server_url,
+                origin,
             })),
             _ => Err(NewRealTokenFetcherError::NoToken),
         }
@@ -175,7 +175,7 @@ impl GitHubActions {
         let mut oidc_token_url = self.oidc_token_request_url.clone();
         oidc_token_url.query_pairs_mut().append_pair(
             "audience",
-            &self.server_url.origin().ascii_serialization(),
+            &self.origin.origin().ascii_serialization(),
         );
 
         let response = self
@@ -200,7 +200,7 @@ impl GitHubActions {
             .value;
 
         let exchange_url = self
-            .server_url
+            .origin
             .join(auth_github_actions::Endpoint::PATH)
             .expect("valid URL");
 

@@ -21,11 +21,7 @@ use crate::event_loop;
 use crate::nix_store::NixStore;
 #[cfg(feature = "sub60-cache")]
 use crate::real_cache::RealCache;
-use crate::real_cache::{
-    RealCacheConnectError,
-    RealCacheRunArgs,
-    SUB60_CACHE_URL,
-};
+use crate::real_cache::{RealCacheConnectError, RealCacheRunArgs};
 use crate::real_context::RealContext;
 use crate::real_token_fetcher::{
     NewRealTokenFetcherError,
@@ -49,6 +45,10 @@ pub struct RunArgs {
         value_parser = parse_upstream_caches,
     )]
     pub(crate) upstream_caches: SmallVec<[url::Url; 2]>,
+
+    /// The origin of the cache's server, e.g. `https://cache.sub60.dev`.
+    #[arg(long, value_parser = parse_origin)]
+    pub(crate) origin: url::Url,
 
     #[command(flatten)]
     pub(crate) cache_args: RealCacheRunArgs,
@@ -126,11 +126,9 @@ async fn start(
         .await
         .map_err(StartError::ConnectToCache)?;
 
-    let token_fetcher = RealTokenFetcher::new(
-        &args.token_fetcher_args,
-        SUB60_CACHE_URL.clone(),
-    )
-    .map_err(StartError::NewTokenFetcher)?;
+    let token_fetcher =
+        RealTokenFetcher::new(&args.token_fetcher_args, args.origin.clone())
+            .map_err(StartError::NewTokenFetcher)?;
 
     let mut ctx = RealContext::new(nix_store, spawner, token_fetcher);
 
@@ -143,6 +141,18 @@ fn parse_upstream_caches(
     value: &str,
 ) -> Result<SmallVec<[url::Url; 2]>, url::ParseError> {
     value.split(',').filter(|value| !value.is_empty()).map(str::parse).collect()
+}
+
+fn parse_origin(value: &str) -> Result<url::Url, String> {
+    let url = value.parse::<url::Url>().map_err(|err| err.to_string())?;
+
+    if url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
+        return Err(
+            "must be an origin, without a path, query or fragment".into()
+        );
+    }
+
+    Ok(url)
 }
 
 impl Stream for UnixStreams {

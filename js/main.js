@@ -383,6 +383,7 @@ const parseUpstreamCaches = (input) => {
  * @returns {Promise<void>}
  */
 const main = async () => {
+  const origin = core.getInput("origin", { required: true });
   const namespace = core.getInput("namespace", { required: true });
   const cache = core.getInput("cache", { required: true });
   const token = core.getInput("token");
@@ -462,6 +463,8 @@ const main = async () => {
       paths.socket,
       "--ready-fd",
       "3",
+      "--origin",
+      origin,
       "--namespace",
       namespace,
       "--cache",

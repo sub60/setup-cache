@@ -5,7 +5,6 @@ use core::time::Duration;
 use core::{fmt, iter};
 use std::collections::VecDeque;
 use std::io;
-use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::{Bytes, BytesMut};
@@ -26,9 +25,6 @@ use crate::protocol::StoreDir;
 use crate::run::RunArgs;
 use crate::token::Token;
 use crate::tokio::TokioSpawner;
-
-pub(crate) static SUB60_CACHE_URL: LazyLock<url::Url> =
-    LazyLock::new(|| "https://cache.sub60.dev".parse().expect("valid URL"));
 
 #[derive(Clone)]
 pub(crate) struct RealCache {
@@ -124,10 +120,10 @@ impl fmt::Display for ResponseBodySuffix<'_> {
 impl RealCache {
     /// TODO: docs.
     pub(crate) async fn connect(
-        RunArgs { cache_args: args, .. }: &RunArgs,
+        RunArgs { cache_args: args, origin, .. }: &RunArgs,
         spawner: TokioSpawner,
     ) -> Result<Self, RealCacheConnectError> {
-        let mut cache_url = SUB60_CACHE_URL.clone();
+        let mut cache_url = origin.clone();
         cache_url
             .path_segments_mut()
             .expect("cache URL can be a base")

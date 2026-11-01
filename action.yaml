@@ -3,6 +3,10 @@ name: "sub60's cache action"
 description: "Sets up and drains the sub60 Nix cache uploader"
 
 inputs:
+  origin:
+    description: "The origin of the cache's server"
+    required: false
+    default: "https://cache.sub60.dev"
   namespace:
     description: "The sub60 namespace containing the cache"
     required: false
