@@ -104,6 +104,13 @@ const group = async (name, fn) => {
 /**
  * @param {string} message
  */
+const warning = (message) => {
+  process.stdout.write(`::warning::${message}\n`);
+};
+
+/**
+ * @param {string} message
+ */
 const setFailed = (message) => {
   process.exitCode = 1;
   process.stderr.write(`::error::${message}\n`);
@@ -117,4 +124,5 @@ module.exports = {
   info,
   saveState,
   setFailed,
+  warning,
 };

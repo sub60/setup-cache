@@ -2,6 +2,7 @@ use futures::AsyncWrite;
 
 use crate::nix_store::NixStore;
 use crate::real_stop_progress_reporter::RealStopProgressReporter;
+use crate::real_token_fetcher::{FetchTokenError, RealTokenFetcher};
 use crate::tokio::TokioSpawner;
 use crate::{context, protocol};
 
@@ -9,19 +10,29 @@ pub(crate) struct RealContext {
     http_client: reqwest::Client,
     nix_store: NixStore,
     spawner: TokioSpawner,
+    token_fetcher: RealTokenFetcher,
 }
 
 impl RealContext {
-    pub(crate) fn new(nix_store: NixStore, spawner: TokioSpawner) -> Self {
-        Self { http_client: reqwest::Client::new(), nix_store, spawner }
+    pub(crate) fn new(
+        nix_store: NixStore,
+        spawner: TokioSpawner,
+        token_fetcher: RealTokenFetcher,
+    ) -> Self {
+        Self {
+            http_client: reqwest::Client::new(),
+            nix_store,
+            spawner,
+            token_fetcher,
+        }
     }
 }
-
 impl context::Context for RealContext {
     #[cfg(not(feature = "sub60-cache"))]
     type Cache = crate::any_cache::AnyCache;
     #[cfg(feature = "sub60-cache")]
-    type Cache = crate::sub60_cache::Sub60Cache;
+    type Cache = crate::real_cache::RealCache;
+    type FetchTokenError = FetchTokenError;
     type HttpClient = reqwest::Client;
     type StopProgressReporter<W: AsyncWrite + Unpin> =
         RealStopProgressReporter<W>;
@@ -49,6 +60,10 @@ impl context::Context for RealContext {
 
     fn spawner(&self) -> &Self::Spawner {
         &self.spawner
+    }
+
+    fn token_fetcher(&self) -> RealTokenFetcher {
+        self.token_fetcher.clone()
     }
 }
 

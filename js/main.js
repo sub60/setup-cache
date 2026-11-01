@@ -385,7 +385,7 @@ const parseUpstreamCaches = (input) => {
 const main = async () => {
   const namespace = core.getInput("namespace", { required: true });
   const cache = core.getInput("cache", { required: true });
-  const authToken = core.getInput("auth-token", { required: true });
+  const token = core.getInput("token");
   const upstreamCaches = parseUpstreamCaches(core.getInput("upstream-caches"));
   const githubToken = core.getInput("github-token");
   const releaseRepository =
@@ -393,6 +393,20 @@ const main = async () => {
     process.env.GITHUB_ACTION_REPOSITORY?.trim() ||
     DEFAULT_RELEASE_REPOSITORY;
   const runnerTemp = process.env.RUNNER_TEMP || os.tmpdir();
+
+  // GitHub only sets these when the job has the `id-token: write` permission.
+  const canRequestOidcToken =
+    !!process.env.ACTIONS_ID_TOKEN_REQUEST_URL &&
+    !!process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
+
+  if (!token && !canRequestOidcToken) {
+    core.warning(
+      "Store paths won't be pushed to the cache, because there's no token " +
+        "to push them with. Give the job the `id-token: write` permission, " +
+        "or set the `token` input.",
+    );
+    return;
+  }
 
   const target = await core.group("Detect platform", () => {
     const runnerOs = requiredEnv("RUNNER_OS");
@@ -448,8 +462,6 @@ const main = async () => {
       paths.socket,
       "--ready-fd",
       "3",
-      "--auth-token",
-      authToken,
       "--namespace",
       namespace,
       "--cache",
@@ -465,6 +477,10 @@ const main = async () => {
       const daemonLogFd = fs.openSync(paths.daemonLog, "a");
       try {
         child = spawn(paths.binary, daemonArgs, {
+          // The token is passed in the environment, since other users'
+          // processes, like Nix's builds, can read a process's arguments but
+          // not its environment.
+          env: token ? { ...process.env, SUB60_CACHE_TOKEN: token } : undefined,
           detached: true,
           stdio: ["ignore", daemonLogFd, daemonLogFd, "pipe"],
         });

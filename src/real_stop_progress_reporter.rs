@@ -102,8 +102,61 @@ impl<W: AsyncWrite + Unpin> context::StopProgressReporter
         }
         .expect("never fails");
 
+        // Warnings are shown as annotations on the workflow run, since the job
+        // itself doesn't fail.
+
+        if let Some(error) = &report.token_error {
+            write!(
+                &mut msg,
+                "::warning::Couldn't get a token to push store paths with: \
+                 {error}"
+            )
+            .expect("never fails");
+
+            // Annotations are a single line, so the causes are joined with
+            // colons.
+            let mut source = error.source();
+            while let Some(err) = source {
+                write!(&mut msg, ": {err}").expect("never fails");
+                source = err.source();
+            }
+
+            msg.write_char('\n').expect("never fails");
+        }
+
         let num_errors = report.path_closure_errors.len()
             + report.path_handling_errors.len();
+
+        let num_not_pushed =
+            num_errors + report.num_paths_without_token as usize;
+
+        if num_not_pushed > 0 {
+            writeln!(
+                &mut msg,
+                "::warning::{num_not_pushed} store path{} {} pushed to the \
+                 cache, see the logs of setup-cache's post step",
+                if num_not_pushed == 1 { "" } else { "s" },
+                if num_not_pushed == 1 { "wasn't" } else { "weren't" },
+            )
+            .expect("never fails");
+        }
+
+        if report.num_paths_without_token > 0 {
+            writeln!(
+                &mut msg,
+                "{} store path{} {} handled because there was no token to \
+                 push {} with",
+                report.num_paths_without_token,
+                if report.num_paths_without_token == 1 { "" } else { "s" },
+                if report.num_paths_without_token == 1 {
+                    "wasn't"
+                } else {
+                    "weren't"
+                },
+                if report.num_paths_without_token == 1 { "it" } else { "them" },
+            )
+            .expect("never fails");
+        }
 
         if num_errors > 0 {
             writeln!(

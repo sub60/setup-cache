@@ -13,46 +13,40 @@ use futures::{AsyncRead, FutureExt};
 use nix_types::{NarFileName, NarInfo, NarInfoFileName};
 use reqwest::{Method, StatusCode, header};
 use smallvec::SmallVec;
-use sub60_cache::nar_multiparts::{
-    CompleteRequestBody,
-    Etag,
-    NarMultipartsResponseBody,
-    PartsRequestBody,
-    PartsResponseBody,
-    UploadId,
+use sub60_cache_api::endpoints::{
+    nar_multiparts,
+    nar_multiparts_complete,
+    nar_multiparts_parts,
 };
-use sub60_cache::{CacheName, NamespaceName};
+use sub60_cache_api::{CacheName, Etag, NamespaceName};
 
 use crate::async_read_ext::AsyncReadExt;
 use crate::context;
 use crate::protocol::StoreDir;
 use crate::run::RunArgs;
+use crate::token::Token;
 use crate::tokio::TokioSpawner;
 
-type AuthToken = String;
-
-static SUB60_CACHE_URL: LazyLock<url::Url> =
+pub(crate) static SUB60_CACHE_URL: LazyLock<url::Url> =
     LazyLock::new(|| "https://cache.sub60.dev".parse().expect("valid URL"));
 
 #[derive(Clone)]
-pub(crate) struct Sub60Cache {
+pub(crate) struct RealCache {
     cache_url: url::Url,
     client: reqwest::Client,
     spawner: TokioSpawner,
 }
 
 #[derive(Debug, clap::Args)]
-pub(crate) struct Sub60CacheRunArgs {
+pub(crate) struct RealCacheRunArgs {
     #[arg(long)]
     namespace: NamespaceName,
     #[arg(long)]
     cache: CacheName,
-    #[arg(long)]
-    auth_token: AuthToken,
 }
 
 #[derive(Debug, derive_more::Display, cauchy::Error)]
-pub(crate) enum Sub60CacheConnectError {
+pub(crate) enum RealCacheConnectError {
     #[display("couldn't build HTTP client")]
     BuildHttpClient(#[source] reqwest::Error),
 }
@@ -77,11 +71,11 @@ pub(crate) enum CacheRequestError {
     },
     #[display("couldn't parse NAR multipart response body")]
     ParseNarMultipartsResponseBody(
-        #[source] <NarMultipartsResponseBody as core::str::FromStr>::Err,
+        #[source] <nar_multiparts::ResponseBody as FromStr>::Err,
     ),
     #[display("couldn't parse multipart parts response body")]
     ParsePartsResponseBody(
-        #[source] <PartsResponseBody as core::str::FromStr>::Err,
+        #[source] <nar_multiparts_parts::ResponseBody as FromStr>::Err,
     ),
     #[display("couldn't read NAR bytes")]
     ReadNar(#[source] io::Error),
@@ -115,7 +109,7 @@ pub(crate) enum QuotedFromStrError<T> {
 
 struct Quoted<T>(T);
 
-struct ResponseBodySuffix<'a>(&'a str);
+pub(crate) struct ResponseBodySuffix<'a>(pub(crate) &'a str);
 
 impl fmt::Display for ResponseBodySuffix<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -127,12 +121,12 @@ impl fmt::Display for ResponseBodySuffix<'_> {
     }
 }
 
-impl Sub60Cache {
+impl RealCache {
     /// TODO: docs.
     pub(crate) async fn connect(
-        RunArgs { sub60_cache_args: args, .. }: &RunArgs,
+        RunArgs { cache_args: args, .. }: &RunArgs,
         spawner: TokioSpawner,
-    ) -> Result<Self, Sub60CacheConnectError> {
+    ) -> Result<Self, RealCacheConnectError> {
         let mut cache_url = SUB60_CACHE_URL.clone();
         cache_url
             .path_segments_mut()
@@ -142,7 +136,7 @@ impl Sub60Cache {
 
         let client = reqwest::Client::builder()
             .build()
-            .map_err(Sub60CacheConnectError::BuildHttpClient)?;
+            .map_err(RealCacheConnectError::BuildHttpClient)?;
 
         Ok(Self { cache_url, client, spawner })
     }
@@ -151,13 +145,15 @@ impl Sub60Cache {
     /// cache already contains it.
     async fn initiate_multipart_nar_upload(
         &self,
+        token: &Token,
         nar_file_name: &NarFileName,
-    ) -> Result<Option<NarMultipartsResponseBody>, CacheRequestError> {
+    ) -> Result<Option<nar_multiparts::ResponseBody>, CacheRequestError> {
         let url = self.nar_multiparts_url();
 
         let response = self
             .client
             .post(url.clone())
+            .header(header::AUTHORIZATION, token.authorization())
             .body(nar_file_name.to_string())
             .send()
             .await
@@ -186,15 +182,16 @@ impl Sub60Cache {
                 method: Method::POST,
                 source,
             })?
-            .parse::<NarMultipartsResponseBody>()
+            .parse::<nar_multiparts::ResponseBody>()
             .map(Some)
             .map_err(CacheRequestError::ParseNarMultipartsResponseBody)
     }
 
     async fn complete_multipart_nar_upload(
         &self,
+        token: &Token,
         nar_file_name: NarFileName,
-        upload_id: &UploadId,
+        upload_id: &nar_multiparts::UploadId,
         etags: SmallVec<[Etag; 8]>,
     ) -> Result<bool, CacheRequestError> {
         let url = self.nar_multiparts_complete_url(upload_id);
@@ -202,7 +199,11 @@ impl Sub60Cache {
         let response = self
             .client
             .post(url.clone())
-            .body(CompleteRequestBody { etags, nar_file_name }.to_string())
+            .header(header::AUTHORIZATION, token.authorization())
+            .body(
+                nar_multiparts_complete::RequestBody { etags, nar_file_name }
+                    .to_string(),
+            )
             .send()
             .await
             .map_err(|source| CacheRequestError::HttpRequest {
@@ -238,7 +239,10 @@ impl Sub60Cache {
         url
     }
 
-    fn nar_multiparts_parts_url(&self, upload_id: &UploadId) -> url::Url {
+    fn nar_multiparts_parts_url(
+        &self,
+        upload_id: &nar_multiparts::UploadId,
+    ) -> url::Url {
         let mut url = self.nar_multiparts_url();
         url.path_segments_mut()
             .expect("URL can be a base")
@@ -247,7 +251,10 @@ impl Sub60Cache {
         url
     }
 
-    fn nar_multiparts_complete_url(&self, upload_id: &UploadId) -> url::Url {
+    fn nar_multiparts_complete_url(
+        &self,
+        upload_id: &nar_multiparts::UploadId,
+    ) -> url::Url {
         let mut url = self.nar_multiparts_url();
         url.path_segments_mut()
             .expect("URL can be a base")
@@ -258,16 +265,24 @@ impl Sub60Cache {
 
     async fn request_part_urls(
         &self,
-        upload_id: &UploadId,
+        token: &Token,
+        upload_id: &nar_multiparts::UploadId,
         part_numbers: SmallVec<[NonZeroU16; 8]>,
         nar_file_name: NarFileName,
-    ) -> Result<PartsResponseBody, CacheRequestError> {
+    ) -> Result<nar_multiparts_parts::ResponseBody, CacheRequestError> {
         let url = self.nar_multiparts_parts_url(upload_id);
 
         let response = self
             .client
             .post(url.clone())
-            .body(PartsRequestBody { part_numbers, nar_file_name }.to_string())
+            .header(header::AUTHORIZATION, token.authorization())
+            .body(
+                nar_multiparts_parts::RequestBody {
+                    part_numbers,
+                    nar_file_name,
+                }
+                .to_string(),
+            )
             .send()
             .await
             .map_err(|source| CacheRequestError::HttpRequest {
@@ -291,7 +306,7 @@ impl Sub60Cache {
                 method: Method::POST,
                 source,
             })?
-            .parse::<PartsResponseBody>()
+            .parse::<nar_multiparts_parts::ResponseBody>()
             .map_err(CacheRequestError::ParsePartsResponseBody)
     }
 
@@ -342,8 +357,9 @@ impl Sub60Cache {
 
     async fn upload_nar_multiparts(
         &self,
+        token: &Token,
         nar_file_name: &NarFileName,
-        initiate_body: &NarMultipartsResponseBody,
+        initiate_body: &nar_multiparts::ResponseBody,
         nar_bytes: impl AsyncRead + Send + 'static,
     ) -> Result<SmallVec<[Etag; 8]>, CacheRequestError> {
         let part_size = initiate_body.part_size.get() as usize;
@@ -376,6 +392,7 @@ impl Sub60Cache {
                     .collect::<SmallVec<_>>();
                 let parts = self
                     .request_part_urls(
+                        token,
                         &initiate_body.upload_id,
                         new_part_numbers,
                         nar_file_name.clone(),
@@ -439,33 +456,36 @@ impl CacheRequestError {
     }
 }
 
-impl context::Cache for Sub60Cache {
+impl context::Cache for RealCache {
     type Error = CacheRequestError;
 
     fn has_narinfo(
         &self,
+        token: &Token,
         narinfo_filename: &NarInfoFileName,
     ) -> impl Future<Output = Result<bool, Self::Error>> + Send {
         let url = self.narinfo_url(narinfo_filename);
 
         #[expect(clippy::result_large_err)]
-        let future =
-            self.client.head(url.clone()).send().map(
-                move |result| match result.map(|resp| resp.status()) {
-                    Ok(StatusCode::OK) => Ok(true),
-                    Ok(StatusCode::NOT_FOUND) => Ok(false),
-                    Ok(status) => Err(CacheRequestError::UnexpectedResponse {
-                        method: Method::HEAD,
-                        status,
-                        url,
-                        body: String::new(),
-                    }),
-                    Err(source) => Err(CacheRequestError::HttpRequest {
-                        method: Method::HEAD,
-                        source,
-                    }),
-                },
-            );
+        let future = self
+            .client
+            .head(url.clone())
+            .header(header::AUTHORIZATION, token.authorization())
+            .send()
+            .map(move |result| match result.map(|resp| resp.status()) {
+                Ok(StatusCode::OK) => Ok(true),
+                Ok(StatusCode::NOT_FOUND) => Ok(false),
+                Ok(status) => Err(CacheRequestError::UnexpectedResponse {
+                    method: Method::HEAD,
+                    status,
+                    url,
+                    body: String::new(),
+                }),
+                Err(source) => Err(CacheRequestError::HttpRequest {
+                    method: Method::HEAD,
+                    source,
+                }),
+            });
 
         // The caller will race this NARInfo lookup against the upstream caches
         // and intentionally drops the losing future. Dropping an in-flight
@@ -486,22 +506,29 @@ impl context::Cache for Sub60Cache {
 
     async fn upload_nar(
         &self,
+        token: &Token,
         nar_file_name: NarFileName,
         nar_size: NonZeroU64,
         nar_bytes: impl AsyncRead + Send + 'static,
     ) -> Result<u64, Self::Error> {
         let Some(initiate_body) =
-            self.initiate_multipart_nar_upload(&nar_file_name).await?
+            self.initiate_multipart_nar_upload(token, &nar_file_name).await?
         else {
             return Ok(0);
         };
 
         let etags = self
-            .upload_nar_multiparts(&nar_file_name, &initiate_body, nar_bytes)
+            .upload_nar_multiparts(
+                token,
+                &nar_file_name,
+                &initiate_body,
+                nar_bytes,
+            )
             .await?;
 
         let did_insert = self
             .complete_multipart_nar_upload(
+                token,
                 nar_file_name,
                 &initiate_body.upload_id,
                 etags,
@@ -513,6 +540,7 @@ impl context::Cache for Sub60Cache {
 
     async fn upload_narinfo(
         &self,
+        token: &Token,
         narinfo_filename: NarInfoFileName,
         narinfo: NarInfo<(), StoreDir>,
     ) -> Result<u64, Self::Error> {
@@ -522,13 +550,17 @@ impl context::Cache for Sub60Cache {
 
         let url = self.narinfo_url(&narinfo_filename);
 
-        let response =
-            self.client.put(url.clone()).body(narinfo).send().await.map_err(
-                |source| CacheRequestError::HttpRequest {
-                    method: Method::PUT,
-                    source,
-                },
-            )?;
+        let response = self
+            .client
+            .put(url.clone())
+            .header(header::AUTHORIZATION, token.authorization())
+            .body(narinfo)
+            .send()
+            .await
+            .map_err(|source| CacheRequestError::HttpRequest {
+                method: Method::PUT,
+                source,
+            })?;
 
         match response.status() {
             StatusCode::CREATED => Ok(narinfo_size),

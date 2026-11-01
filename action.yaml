@@ -11,9 +11,9 @@ inputs:
     description: "The sub60 cache name"
     required: false
     default: ${{ github.event.repository.name }}
-  auth-token:
-    description: "The authentication token used to push store paths"
-    required: true
+  token:
+    description: "The token used to push store paths. If unset, the job's GitHub Actions OIDC token is exchanged for one, which needs the job to have the `id-token: write` permission"
+    required: false
   upstream-caches:
     description: "Space/newline-separated binary cache URLs whose store paths should not be pushed. Use 'none' to disable"
     required: false

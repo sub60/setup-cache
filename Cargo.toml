@@ -11,7 +11,7 @@ async-compat = "0.2"
 async-compression = { version = "0.4", features = ["futures-io", "zstd"] }
 bytes = "1"
 cauchy = { git = "https://github.com/nomad/cauchy.git" }
-clap = { version = "4.5.38", features = ["derive"] }
+clap = { version = "4.5", features = ["derive", "env"] }
 derive_more = { version = "2", default-features = false, features = [
   "display",
 ] }
@@ -31,10 +31,12 @@ nixb = { git = "https://github.com/noib3/nixb", branch = "store-path-info", feat
 ] }
 pin-project-lite = "0.2"
 reqwest = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 sha2 = "0.11"
 smallvec = "1"
-smol_str = "0.3.6"
-sub60-cache = { git = "https://github.com/sub60/cache.git" }
+smol_str = "0.3"
+sub60-cache-api = { git = "https://github.com/sub60/cache.git" }
 tempfile = "3"
 tokio = { version = "1", default-features = false, features = [
   "fs",

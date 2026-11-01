@@ -1,6 +1,7 @@
 use core::num::NonZeroU64;
 use core::pin::{Pin, pin};
 use core::task::{Context as TaskContext, Poll};
+use core::time::Duration;
 use std::collections::{HashSet, VecDeque};
 use std::io;
 
@@ -36,12 +37,17 @@ use crate::context::{
     Spawner,
     StopProgressReporter,
     StorePathInfos,
+    TokenFetcher,
 };
 use crate::protocol::{self, StoreDir};
 use crate::run::RunArgs;
+use crate::token::Token;
 
 /// Maximum number of store paths handled concurrently.
 const MAX_CONCURRENT_STORE_PATHS: usize = 32;
+
+/// How long before the token expires it's replaced with a new one.
+const TOKEN_REFRESH_MARGIN: Duration = Duration::from_mins(5);
 
 /// Target upper bound for memory occupied by all in-memory NAR buffers.
 const MAX_IN_MEMORY_NAR_BUFFERS_SIZE: usize = 256 * 1024 * 1024;
@@ -67,6 +73,13 @@ pub(crate) struct ActionReport<Ctx: Context> {
 
     /// The number of store paths already stored in the cache
     pub(crate) num_paths_skipped: u32,
+
+    /// The number of store paths that weren't handled because the token to
+    /// push them with couldn't be fetched.
+    pub(crate) num_paths_without_token: u32,
+
+    /// The error fetching or refreshing the token, if any.
+    pub(crate) token_error: Option<Ctx::FetchTokenError>,
 
     /// The list of store paths for which it wasn't possible to compute their
     /// closure, together with the corresponding error.
@@ -109,6 +122,27 @@ enum Event<Writer> {
     Stop(Writer),
 }
 
+/// The state of the token store paths are pushed with.
+enum TokenState {
+    /// No store path has been pushed yet.
+    NotFetched,
+
+    /// The token is being fetched for the first time.
+    Fetching,
+
+    Fetched(Token),
+
+    /// Fetching or refreshing the token failed, so the store paths received
+    /// afterwards aren't handled.
+    Failed,
+}
+
+/// An event sent by the [task](fetch_and_refresh_token) managing the token.
+enum TokenEvent<E> {
+    Fetched(Token),
+    Failed(E),
+}
+
 pin_project! {
     /// An [`AsyncWrite`] adapter which maintains a running SHA-256 hash of the
     /// written bytes and counts how many bytes were successfully written.
@@ -133,17 +167,46 @@ pub(crate) async fn run<Ctx: Context>(
     ctx: &mut Ctx,
 ) {
     let (message_tx, message_rx) = flume::unbounded();
+    let (token_tx, token_rx) = flume::unbounded();
 
     let mut store_closures = FuturesUnordered::new();
     let mut handle_store_paths = FuturesUnordered::new();
     let mut pending_handle_store_paths = VecDeque::new();
+    let mut store_paths_waiting_for_token = Vec::new();
     let mut seen_store_hashes = HashSet::new();
+    let mut token_state = TokenState::NotFetched;
 
     let mut report = ActionReport::<Ctx>::default();
     let mut stop_progress_writer = None;
 
+    let http_client = ctx.http_client().clone();
+    let nix = ctx.nix().clone();
+
+    let handle_store_path_fut = |path: StorePath<StoreDir>, token: Token| {
+        let mut upstream_caches = args.upstream_caches.clone();
+        let cache = cache.clone();
+        let http_client = http_client.clone();
+        let mut nix = nix.clone();
+        async move {
+            let result = handle_store_path(
+                &path,
+                &token,
+                &mut upstream_caches,
+                &cache,
+                &http_client,
+                &mut nix,
+            )
+            .await;
+            (result, path)
+        }
+    };
+
     loop {
-        if stop_progress_writer.is_some() && store_closures.is_empty() {
+        // The store paths waiting for the token are handled once it's fetched.
+        if stop_progress_writer.is_some()
+            && store_closures.is_empty()
+            && !matches!(token_state, TokenState::Fetching)
+        {
             break;
         }
 
@@ -161,6 +224,17 @@ pub(crate) async fn run<Ctx: Context>(
                                 .map_err(|err| (store_path, err))
                         };
                         store_closures.push(ctx.spawner().spawn(fut));
+
+                        // Lazily fetch the token when we receive the first
+                        // store path to be pushed.
+                        if matches!(token_state, TokenState::NotFetched) {
+                            let token_fetcher = ctx.token_fetcher();
+                            let token_tx = token_tx.clone();
+                            ctx.spawner()
+                                .spawn(fetch_and_refresh_token(token_fetcher, token_tx))
+                                .detach();
+                            token_state = TokenState::Fetching;
+                        }
                     },
                     Ok(Event::Stop(writer)) => {
                         stop_progress_writer = Some(writer);
@@ -177,21 +251,23 @@ pub(crate) async fn run<Ctx: Context>(
                                 continue;
                             }
 
-                            let mut upstream_caches = args.upstream_caches.clone();
-                            let cache = cache.clone();
-                            let http_client = ctx.http_client().clone();
-                            let mut nix = ctx.nix().clone();
-                            let fut = async move {
-                                let result = handle_store_path(
-                                    &path,
-                                    &mut upstream_caches,
-                                    &cache,
-                                    &http_client,
-                                    &mut nix,
-                                )
-                                .await;
-                                (result, path)
+                            let token = match &token_state {
+                                TokenState::Fetched(token) => token.clone(),
+                                TokenState::Fetching => {
+                                    store_paths_waiting_for_token.push(path);
+                                    continue;
+                                },
+                                TokenState::NotFetched => unreachable!(
+                                    "the token is fetched when the first store \
+                                    path is pushed"
+                                ),
+                                TokenState::Failed => {
+                                    report.num_paths_without_token += 1;
+                                    continue;
+                                },
                             };
+
+                            let fut = handle_store_path_fut(path, token);
 
                             if handle_store_paths.len() < MAX_CONCURRENT_STORE_PATHS {
                                 handle_store_paths.push(ctx.spawner().spawn(fut));
@@ -201,6 +277,29 @@ pub(crate) async fn run<Ctx: Context>(
                         }
                     },
                     Err(tuple) => report.path_closure_errors.push(tuple),
+                }
+            },
+            token_event = token_rx.recv_async() => {
+                match token_event.expect("token_tx is still alive") {
+                    TokenEvent::Fetched(token) => {
+                        for path in store_paths_waiting_for_token.drain(..) {
+                            let fut = handle_store_path_fut(path, token.clone());
+
+                            if handle_store_paths.len() < MAX_CONCURRENT_STORE_PATHS {
+                                handle_store_paths.push(ctx.spawner().spawn(fut));
+                            } else {
+                                pending_handle_store_paths.push_back(fut);
+                            }
+                        }
+                        token_state = TokenState::Fetched(token);
+                    },
+                    TokenEvent::Failed(err) => {
+                        report.num_paths_without_token +=
+                            store_paths_waiting_for_token.len() as u32;
+                        store_paths_waiting_for_token.clear();
+                        report.token_error = Some(err);
+                        token_state = TokenState::Failed;
+                    },
                 }
             },
             (result, path) = handle_store_paths.select_next_some() => {
@@ -280,6 +379,43 @@ async fn handle_io<I: Io>(
     }
 }
 
+/// Fetches the token store paths are pushed with, and replaces it with a new
+/// one before it expires.
+async fn fetch_and_refresh_token<F: TokenFetcher>(
+    token_fetcher: F,
+    token_tx: flume::Sender<TokenEvent<F::Error>>,
+) {
+    let mut token = None::<Token>;
+
+    loop {
+        let (authorization, expires_in) = match token_fetcher.fetch().await {
+            Ok(fetched) => fetched,
+            Err(err) => {
+                let _ = token_tx.send(TokenEvent::Failed(err));
+                return;
+            },
+        };
+
+        match &token {
+            Some(token) => token.update(authorization),
+            None => {
+                let new_token = Token::new(authorization);
+                let _ = token_tx.send(TokenEvent::Fetched(new_token.clone()));
+                token = Some(new_token);
+            },
+        }
+
+        let Some(expires_in) = expires_in else { return };
+
+        // A token valid for less than the margin is refreshed halfway through
+        // instead of right away, so it's not refreshed in a loop.
+        tokio::time::sleep(
+            expires_in.saturating_sub(TOKEN_REFRESH_MARGIN).max(expires_in / 2),
+        )
+        .await;
+    }
+}
+
 /// Handles the given store path by first checking if it's already cached, then
 /// uploading the path's NAR (compressed) and NARInfo if it isn't.
 ///
@@ -287,6 +423,7 @@ async fn handle_io<I: Io>(
 /// was cached.
 async fn handle_store_path<C: Cache, H: HttpClient, N: Nix>(
     store_path: &StorePath<StoreDir>,
+    token: &Token,
     upstream_caches: &mut [url::Url],
     cache: &C,
     http_client: &H,
@@ -296,6 +433,7 @@ async fn handle_store_path<C: Cache, H: HttpClient, N: Nix>(
 
     if !should_push_store_path(
         &narinfo_filename,
+        token,
         upstream_caches,
         cache,
         http_client,
@@ -363,7 +501,7 @@ async fn handle_store_path<C: Cache, H: HttpClient, N: Nix>(
     // the cache server temporarily reporting false positives.
 
     let nar_size_pushed = cache
-        .upload_nar(nar_file_name, file_size, nar_buf)
+        .upload_nar(token, nar_file_name, file_size, nar_buf)
         .await
         .map_err(HandlePathError::UploadNar)?;
 
@@ -385,7 +523,7 @@ async fn handle_store_path<C: Cache, H: HttpClient, N: Nix>(
     .map_err(HandlePathError::GetPathInfos)?;
 
     let narinfo_size = cache
-        .upload_narinfo(narinfo_filename, narinfo)
+        .upload_narinfo(token, narinfo_filename, narinfo)
         .await
         .map_err(HandlePathError::UploadNarInfo)?;
 
@@ -394,11 +532,12 @@ async fn handle_store_path<C: Cache, H: HttpClient, N: Nix>(
 
 async fn should_push_store_path<C: Cache, H: HttpClient>(
     narinfo_filename: &NarInfoFileName,
+    token: &Token,
     upstream_caches: &mut [url::Url],
     cache: &C,
     http_client: &H,
 ) -> Result<bool, C::Error> {
-    let cache_has_narinfo = cache.has_narinfo(narinfo_filename);
+    let cache_has_narinfo = cache.has_narinfo(token, narinfo_filename);
 
     let upstream_has_narinfo = upstream_caches_have_narinfo(
         narinfo_filename,
@@ -467,6 +606,8 @@ impl<Ctx: Context> Default for ActionReport<Ctx> {
             num_bytes_pushed: 0,
             num_paths_pushed: 0,
             num_paths_skipped: 0,
+            num_paths_without_token: 0,
+            token_error: None,
             path_closure_errors: Default::default(),
             path_handling_errors: Default::default(),
         }

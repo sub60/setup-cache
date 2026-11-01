@@ -11,11 +11,13 @@ mod nix_store;
 mod noop_cache;
 mod protocol;
 mod push;
+mod real_cache;
 mod real_context;
 mod real_stop_progress_reporter;
+mod real_token_fetcher;
 mod run;
 mod stop;
-mod sub60_cache;
+mod token;
 mod tokio;
 
 #[derive(Debug, clap::Subcommand)]

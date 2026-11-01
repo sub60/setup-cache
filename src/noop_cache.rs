@@ -6,6 +6,7 @@ use nix_types::{NarFileName, NarInfo, NarInfoFileName};
 
 use crate::context::Cache;
 use crate::protocol::StoreDir;
+use crate::token::Token;
 
 #[derive(Default, Clone, Copy)]
 pub(crate) struct NoopCache {}
@@ -15,6 +16,7 @@ impl Cache for NoopCache {
 
     async fn has_narinfo(
         &self,
+        _: &Token,
         _: &NarInfoFileName,
     ) -> Result<bool, Self::Error> {
         Ok(false)
@@ -22,6 +24,7 @@ impl Cache for NoopCache {
 
     async fn upload_nar(
         &self,
+        _: &Token,
         _: NarFileName,
         _: NonZeroU64,
         nar_bytes: impl AsyncRead + Send + 'static,
@@ -32,6 +35,7 @@ impl Cache for NoopCache {
 
     async fn upload_narinfo(
         &self,
+        _: &Token,
         _: NarInfoFileName,
         narinfo: NarInfo<(), StoreDir>,
     ) -> Result<u64, Self::Error> {

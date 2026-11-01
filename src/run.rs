@@ -19,10 +19,19 @@ use tokio::net::{UnixListener, UnixStream};
 use crate::any_cache::AnyCacheKind;
 use crate::event_loop;
 use crate::nix_store::NixStore;
-use crate::real_context::RealContext;
 #[cfg(feature = "sub60-cache")]
-use crate::sub60_cache::Sub60Cache;
-use crate::sub60_cache::{Sub60CacheConnectError, Sub60CacheRunArgs};
+use crate::real_cache::RealCache;
+use crate::real_cache::{
+    RealCacheConnectError,
+    RealCacheRunArgs,
+    SUB60_CACHE_URL,
+};
+use crate::real_context::RealContext;
+use crate::real_token_fetcher::{
+    NewRealTokenFetcherError,
+    RealTokenFetcher,
+    RealTokenFetcherArgs,
+};
 use crate::tokio::{Tokio, TokioSpawner};
 
 #[derive(Debug, clap::Args)]
@@ -42,7 +51,10 @@ pub struct RunArgs {
     pub(crate) upstream_caches: SmallVec<[url::Url; 2]>,
 
     #[command(flatten)]
-    pub(crate) sub60_cache_args: Sub60CacheRunArgs,
+    pub(crate) cache_args: RealCacheRunArgs,
+
+    #[command(flatten)]
+    token_fetcher_args: RealTokenFetcherArgs,
 
     #[cfg(not(feature = "sub60-cache"))]
     #[arg(long, value_enum)]
@@ -51,7 +63,8 @@ pub struct RunArgs {
 
 enum StartError {
     BindSocket(io::Error),
-    ConnectToCache(Sub60CacheConnectError),
+    ConnectToCache(RealCacheConnectError),
+    NewTokenFetcher(NewRealTokenFetcherError),
     OpenNixStore(nixb::Error),
 }
 
@@ -109,11 +122,17 @@ async fn start(
         .map_err(StartError::ConnectToCache)?;
 
     #[cfg(feature = "sub60-cache")]
-    let cache = Sub60Cache::connect(&args, spawner.clone())
+    let cache = RealCache::connect(&args, spawner.clone())
         .await
         .map_err(StartError::ConnectToCache)?;
 
-    let mut ctx = RealContext::new(nix_store, spawner);
+    let token_fetcher = RealTokenFetcher::new(
+        &args.token_fetcher_args,
+        SUB60_CACHE_URL.clone(),
+    )
+    .map_err(StartError::NewTokenFetcher)?;
+
+    let mut ctx = RealContext::new(nix_store, spawner, token_fetcher);
 
     Ok(async move {
         event_loop::run(args, cache, UnixStreams { listener }, &mut ctx).await;
@@ -171,6 +190,7 @@ impl fmt::Display for StartError {
                 write!(f, "Couldn't bind to Unix domain socket: {io_error}")
             },
             Self::ConnectToCache(error) => error.fmt(f),
+            Self::NewTokenFetcher(error) => error.fmt(f),
             Self::OpenNixStore(error) => {
                 write!(f, "Couldn't open Nix store: {error}")
             },

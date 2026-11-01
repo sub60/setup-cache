@@ -1,7 +1,9 @@
 use core::error::Error;
 use core::num::NonZeroU64;
+use core::time::Duration;
 
 use futures::{AsyncRead, AsyncWrite};
+use http::HeaderValue;
 use nix_types::{
     ContentAddress,
     NarFileName,
@@ -15,9 +17,11 @@ use nix_types::{
 
 use crate::event_loop;
 use crate::protocol::{self, StoreDir};
+use crate::token::Token;
 
 pub trait Context {
     type Cache: Cache;
+    type FetchTokenError: Error + Send;
     type HttpClient: HttpClient;
     type Nix: Nix;
     type Spawner: Spawner;
@@ -35,6 +39,10 @@ pub trait Context {
     fn nix(&self) -> &Self::Nix;
 
     fn spawner(&self) -> &Self::Spawner;
+
+    fn token_fetcher(
+        &self,
+    ) -> impl TokenFetcher<Error = Self::FetchTokenError> + use<Self>;
 }
 
 pub trait Cache: Clone + Send + Sync + 'static {
@@ -42,6 +50,7 @@ pub trait Cache: Clone + Send + Sync + 'static {
 
     fn has_narinfo(
         &self,
+        token: &Token,
         narinfo_filename: &NarInfoFileName,
     ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
 
@@ -49,6 +58,7 @@ pub trait Cache: Clone + Send + Sync + 'static {
     /// zero if an equivalent NAR was already present.
     fn upload_nar(
         &self,
+        token: &Token,
         nar_file_name: NarFileName,
         nar_size: NonZeroU64,
         nar_bytes: impl AsyncRead + Send + 'static,
@@ -58,9 +68,22 @@ pub trait Cache: Clone + Send + Sync + 'static {
     /// Returns zero if an equivalent NARInfo was already present.
     fn upload_narinfo(
         &self,
+        token: &Token,
         narinfo_filename: NarInfoFileName,
         narinfo: NarInfo<(), StoreDir>,
     ) -> impl Future<Output = Result<u64, Self::Error>> + Send;
+}
+
+pub trait TokenFetcher: Send + Sync + 'static {
+    type Error: Error + Send;
+
+    /// Fetches a new token to authenticate requests to the cache with, along
+    /// with how long it's valid for, or `None` if it never expires.
+    fn fetch(
+        &self,
+    ) -> impl Future<
+        Output = Result<(HeaderValue, Option<Duration>), Self::Error>,
+    > + Send;
 }
 
 pub trait HttpClient: Clone + Send + Sync + 'static {

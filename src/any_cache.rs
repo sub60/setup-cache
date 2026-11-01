@@ -6,39 +6,40 @@ use nix_types::{NarFileName, NarInfo, NarInfoFileName};
 use crate::context::Cache;
 use crate::noop_cache::NoopCache;
 use crate::protocol::StoreDir;
+use crate::real_cache::{RealCache, RealCacheConnectError};
 use crate::run::RunArgs;
-use crate::sub60_cache::{Sub60Cache, Sub60CacheConnectError};
+use crate::token::Token;
 use crate::tokio::TokioSpawner;
 
 #[derive(Clone)]
 pub(crate) enum AnyCache {
     Noop(NoopCache),
-    Sub60(Sub60Cache),
+    Real(RealCache),
 }
 
 #[derive(Debug, Copy, Clone, clap::ValueEnum)]
 pub(crate) enum AnyCacheKind {
     Noop,
-    Sub60,
+    Real,
 }
 
 #[derive(Debug, derive_more::Display, cauchy::Error)]
 pub(crate) enum AnyCacheError {
     #[display("no-op cache error")]
     Noop(#[source] <NoopCache as Cache>::Error),
-    #[display("Sub60 cache error")]
-    Sub60(#[source] <Sub60Cache as Cache>::Error),
+    #[display("real cache error")]
+    Real(#[source] <RealCache as Cache>::Error),
 }
 
 impl AnyCache {
     pub(crate) async fn new(
         args: &RunArgs,
         spawner: TokioSpawner,
-    ) -> Result<Self, Sub60CacheConnectError> {
+    ) -> Result<Self, RealCacheConnectError> {
         match args.cache {
             AnyCacheKind::Noop => Ok(NoopCache::default().into()),
-            AnyCacheKind::Sub60 => {
-                Sub60Cache::connect(args, spawner).await.map(Into::into)
+            AnyCacheKind::Real => {
+                RealCache::connect(args, spawner).await.map(Into::into)
             },
         }
     }
@@ -49,31 +50,35 @@ impl Cache for AnyCache {
 
     async fn has_narinfo(
         &self,
+        token: &Token,
         narinfo_filename: &NarInfoFileName,
     ) -> Result<bool, Self::Error> {
         match self {
-            Self::Noop(cache) => {
-                cache.has_narinfo(narinfo_filename).await.map_err(Into::into)
-            },
-            Self::Sub60(cache) => {
-                cache.has_narinfo(narinfo_filename).await.map_err(Into::into)
-            },
+            Self::Noop(cache) => cache
+                .has_narinfo(token, narinfo_filename)
+                .await
+                .map_err(Into::into),
+            Self::Real(cache) => cache
+                .has_narinfo(token, narinfo_filename)
+                .await
+                .map_err(Into::into),
         }
     }
 
     async fn upload_nar(
         &self,
+        token: &Token,
         nar_file_name: NarFileName,
         nar_size: NonZeroU64,
         nar_bytes: impl AsyncRead + Send + 'static,
     ) -> Result<u64, Self::Error> {
         match self {
             Self::Noop(cache) => cache
-                .upload_nar(nar_file_name, nar_size, nar_bytes)
+                .upload_nar(token, nar_file_name, nar_size, nar_bytes)
                 .await
                 .map_err(Into::into),
-            Self::Sub60(cache) => cache
-                .upload_nar(nar_file_name, nar_size, nar_bytes)
+            Self::Real(cache) => cache
+                .upload_nar(token, nar_file_name, nar_size, nar_bytes)
                 .await
                 .map_err(Into::into),
         }
@@ -81,16 +86,17 @@ impl Cache for AnyCache {
 
     async fn upload_narinfo(
         &self,
+        token: &Token,
         narinfo_filename: NarInfoFileName,
         narinfo: NarInfo<(), StoreDir>,
     ) -> Result<u64, Self::Error> {
         match self {
             Self::Noop(cache) => cache
-                .upload_narinfo(narinfo_filename, narinfo)
+                .upload_narinfo(token, narinfo_filename, narinfo)
                 .await
                 .map_err(Into::into),
-            Self::Sub60(cache) => cache
-                .upload_narinfo(narinfo_filename, narinfo)
+            Self::Real(cache) => cache
+                .upload_narinfo(token, narinfo_filename, narinfo)
                 .await
                 .map_err(Into::into),
         }
@@ -103,9 +109,9 @@ impl From<NoopCache> for AnyCache {
     }
 }
 
-impl From<Sub60Cache> for AnyCache {
-    fn from(cache: Sub60Cache) -> Self {
-        Self::Sub60(cache)
+impl From<RealCache> for AnyCache {
+    fn from(cache: RealCache) -> Self {
+        Self::Real(cache)
     }
 }
 
@@ -115,8 +121,8 @@ impl From<<NoopCache as Cache>::Error> for AnyCacheError {
     }
 }
 
-impl From<<Sub60Cache as Cache>::Error> for AnyCacheError {
-    fn from(error: <Sub60Cache as Cache>::Error) -> Self {
-        Self::Sub60(error)
+impl From<<RealCache as Cache>::Error> for AnyCacheError {
+    fn from(error: <RealCache as Cache>::Error) -> Self {
+        Self::Real(error)
     }
 }
