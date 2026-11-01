@@ -9,6 +9,9 @@ jobs:
   build:
     name: build for ${{ matrix.package }}
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      id-token: write
     strategy:
       matrix:
         include:
@@ -36,8 +39,6 @@ jobs:
       - name: Setup Nix cache
         uses: sub60/setup-cache@main
         continue-on-error: true
-        with:
-          auth-token: token
 
       - name: Build package
         run: nix build --accept-flake-config ".#${{ matrix.package }}"

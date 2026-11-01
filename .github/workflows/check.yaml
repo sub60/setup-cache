@@ -9,6 +9,9 @@ on:
 jobs:
   clippy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v6
       - name: Install Nix
@@ -19,20 +22,19 @@ jobs:
           ssh-private-key: ${{ secrets.NOIB3_NIX_JETTISON_SSH_KEY }}
       - name: Setup Nix cache
         uses: sub60/setup-cache@main
-        with:
-          auth-token: token
       - name: Check Clippy
         run: nix run --accept-flake-config .#check-clippy
 
   formatting:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v6
       - name: Install Nix
         uses: NixOS/nix-installer-action@main
       - name: Setup Nix cache
         uses: sub60/setup-cache@main
-        with:
-          auth-token: token
       - name: Check formatting
         run: nix run --accept-flake-config .#check-formatting
