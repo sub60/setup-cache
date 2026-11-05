@@ -8,11 +8,12 @@ use std::io;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::{Bytes, BytesMut};
-use futures::{AsyncRead, FutureExt};
-use nix_types::{NarFileName, NarInfo, NarInfoFileName};
+use futures::AsyncRead;
+use nix_types::{NarFileName, NarInfo, NarInfoFileName, StoreHash};
 use reqwest::{Method, StatusCode, header};
 use smallvec::SmallVec;
 use sub60_cache_api::endpoints::{
+    missing_narinfos,
     nar_multiparts,
     nar_multiparts_complete,
     nar_multiparts_parts,
@@ -24,13 +25,11 @@ use crate::context;
 use crate::protocol::StoreDir;
 use crate::run::RunArgs;
 use crate::token::Token;
-use crate::tokio::TokioSpawner;
 
 #[derive(Clone)]
 pub(crate) struct RealCache {
     cache_url: url::Url,
     client: reqwest::Client,
-    spawner: TokioSpawner,
 }
 
 #[derive(Debug, clap::Args)]
@@ -65,6 +64,10 @@ pub(crate) enum CacheRequestError {
         url: url::Url,
         header: header::HeaderName,
     },
+    #[display("couldn't parse missing NARInfos response body")]
+    ParseMissingNarInfosResponseBody(
+        #[source] <missing_narinfos::ResponseBody as FromStr>::Err,
+    ),
     #[display("couldn't parse NAR multipart response body")]
     ParseNarMultipartsResponseBody(
         #[source] <nar_multiparts::ResponseBody as FromStr>::Err,
@@ -121,7 +124,6 @@ impl RealCache {
     /// TODO: docs.
     pub(crate) async fn connect(
         RunArgs { cache_args: args, origin, .. }: &RunArgs,
-        spawner: TokioSpawner,
     ) -> Result<Self, RealCacheConnectError> {
         let mut cache_url = origin.clone();
         cache_url
@@ -134,7 +136,7 @@ impl RealCache {
             .build()
             .map_err(RealCacheConnectError::BuildHttpClient)?;
 
-        Ok(Self { cache_url, client, spawner })
+        Ok(Self { cache_url, client })
     }
 
     /// Initiates a multipart upload for a NAR of the given size, returning
@@ -231,6 +233,14 @@ impl RealCache {
         url.path_segments_mut()
             .expect("cache URL can be a base")
             .push(&narinfo_filename.to_string());
+        url
+    }
+
+    fn missing_narinfos_url(&self) -> url::Url {
+        let mut url = self.cache_url.clone();
+        url.path_segments_mut()
+            .expect("cache URL can be a base")
+            .push("missing-narinfos");
         url
     }
 
@@ -462,49 +472,51 @@ impl CacheRequestError {
 impl context::Cache for RealCache {
     type Error = CacheRequestError;
 
-    fn has_narinfo(
+    async fn missing_narinfos(
         &self,
         token: &Token,
-        narinfo_filename: &NarInfoFileName,
-    ) -> impl Future<Output = Result<bool, Self::Error>> + Send {
-        let url = self.narinfo_url(narinfo_filename);
+        store_hashes: &[StoreHash],
+    ) -> Result<Vec<StoreHash>, Self::Error> {
+        let url = self.missing_narinfos_url();
 
-        #[expect(clippy::result_large_err)]
-        let future = self
-            .client
-            .head(url.clone())
-            .header(header::AUTHORIZATION, token.authorization())
-            .send()
-            .map(move |result| match result.map(|resp| resp.status()) {
-                Ok(StatusCode::OK) => Ok(true),
-                Ok(StatusCode::NOT_FOUND) => Ok(false),
-                Ok(status) => Err(CacheRequestError::UnexpectedResponse {
-                    method: Method::HEAD,
-                    status,
-                    url,
-                    body: String::new(),
-                }),
-                Err(source) => Err(CacheRequestError::HttpRequest {
-                    method: Method::HEAD,
+        let mut missing = Vec::new();
+
+        for chunk in store_hashes.chunks(missing_narinfos::MAX_STORE_HASHES) {
+            let response = self
+                .client
+                .post(url.clone())
+                .header(header::AUTHORIZATION, token.authorization())
+                .body(missing_narinfos::StoreHashes(chunk.to_vec()).to_string())
+                .send()
+                .await
+                .map_err(|source| CacheRequestError::HttpRequest {
+                    method: Method::POST,
                     source,
-                }),
-            });
+                })?;
 
-        // The caller will race this NARInfo lookup against the upstream caches
-        // and intentionally drops the losing future. Dropping an in-flight
-        // HTTP/2 request causes reqwest to terminate the corresponding stream
-        // by sending an RST_STREAM frame. When handling many paths in rapid
-        // succession, if the upstream lookups repeatedly win their races, this
-        // produces a burst of resets on the single multiplexed connection to
-        // cache.sub60.dev. Cloudflare treats that pattern as an HTTP/2 Rapid
-        // Reset attack and closes the entire connection, taking unrelated
-        // NARInfo lookups down with it (see
-        // <https://blog.cloudflare.com/technical-breakdown-http2-rapid-reset-ddos-attack/>
-        // for details).
-        //
-        // To prevent this, we let the lookup run to completion even if the
-        // caller drops the future.
-        self.spawner.run_to_completion(future)
+            if response.status() != StatusCode::OK {
+                return Err(CacheRequestError::unexpected_response(
+                    response,
+                    Method::POST,
+                    url,
+                )
+                .await);
+            }
+
+            let body = response
+                .text()
+                .await
+                .map_err(|source| CacheRequestError::HttpRequest {
+                    method: Method::POST,
+                    source,
+                })?
+                .parse::<missing_narinfos::ResponseBody>()
+                .map_err(CacheRequestError::ParseMissingNarInfosResponseBody)?;
+
+            missing.extend(body.0);
+        }
+
+        Ok(missing)
     }
 
     async fn upload_nar(

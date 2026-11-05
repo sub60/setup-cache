@@ -12,6 +12,7 @@ use nix_types::{
     Nix32Digest,
     Signature,
     StoreBasename,
+    StoreHash,
     StorePath,
 };
 
@@ -48,11 +49,13 @@ pub trait Context {
 pub trait Cache: Clone + Send + Sync + 'static {
     type Error: Error + Send;
 
-    fn has_narinfo(
+    /// Returns the store hashes of the NARInfos the cache doesn't have, in the
+    /// same order as they appear in `store_hashes`.
+    fn missing_narinfos(
         &self,
         token: &Token,
-        narinfo_filename: &NarInfoFileName,
-    ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
+        store_hashes: &[StoreHash],
+    ) -> impl Future<Output = Result<Vec<StoreHash>, Self::Error>> + Send;
 
     /// Uploads a NAR and returns the number of bytes added to the cache. Returns
     /// zero if an equivalent NAR was already present.

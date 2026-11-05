@@ -1,7 +1,7 @@
 use core::num::NonZeroU64;
 
 use futures::AsyncRead;
-use nix_types::{NarFileName, NarInfo, NarInfoFileName};
+use nix_types::{NarFileName, NarInfo, NarInfoFileName, StoreHash};
 
 use crate::context::Cache;
 use crate::noop_cache::NoopCache;
@@ -9,7 +9,6 @@ use crate::protocol::StoreDir;
 use crate::real_cache::{RealCache, RealCacheConnectError};
 use crate::run::RunArgs;
 use crate::token::Token;
-use crate::tokio::TokioSpawner;
 
 #[derive(Clone)]
 pub(crate) enum AnyCache {
@@ -34,12 +33,11 @@ pub(crate) enum AnyCacheError {
 impl AnyCache {
     pub(crate) async fn new(
         args: &RunArgs,
-        spawner: TokioSpawner,
     ) -> Result<Self, RealCacheConnectError> {
         match args.cache {
             AnyCacheKind::Noop => Ok(NoopCache::default().into()),
             AnyCacheKind::Real => {
-                RealCache::connect(args, spawner).await.map(Into::into)
+                RealCache::connect(args).await.map(Into::into)
             },
         }
     }
@@ -48,18 +46,18 @@ impl AnyCache {
 impl Cache for AnyCache {
     type Error = AnyCacheError;
 
-    async fn has_narinfo(
+    async fn missing_narinfos(
         &self,
         token: &Token,
-        narinfo_filename: &NarInfoFileName,
-    ) -> Result<bool, Self::Error> {
+        store_hashes: &[StoreHash],
+    ) -> Result<Vec<StoreHash>, Self::Error> {
         match self {
             Self::Noop(cache) => cache
-                .has_narinfo(token, narinfo_filename)
+                .missing_narinfos(token, store_hashes)
                 .await
                 .map_err(Into::into),
             Self::Real(cache) => cache
-                .has_narinfo(token, narinfo_filename)
+                .missing_narinfos(token, store_hashes)
                 .await
                 .map_err(Into::into),
         }

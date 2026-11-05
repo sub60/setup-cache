@@ -1,3 +1,4 @@
+use core::mem;
 use core::num::NonZeroU64;
 use core::pin::{Pin, pin};
 use core::task::{Context as TaskContext, Poll};
@@ -81,6 +82,10 @@ pub(crate) struct ActionReport<Ctx: Context> {
     /// The error fetching or refreshing the token, if any.
     pub(crate) token_error: Option<Ctx::FetchTokenError>,
 
+    /// The errors asking the cache which store paths it doesn't have, each with
+    /// the number of store paths that weren't handled because of it.
+    pub(crate) narinfo_lookup_errors: Vec<(u32, <Ctx::Cache as Cache>::Error)>,
+
     /// The list of store paths for which it wasn't possible to compute their
     /// closure, together with the corresponding error.
     pub(crate) path_closure_errors:
@@ -97,8 +102,6 @@ pub(crate) struct ActionReport<Ctx: Context> {
 /// path.
 #[derive(cauchy::Debug, derive_more::Display, cauchy::Error)]
 pub(crate) enum HandlePathError<C: Cache, N: Nix> {
-    #[display("couldn't check NARInfo existence on remote cache")]
-    CheckNarInfoExistence(#[source] C::Error),
     #[display("couldn't create temporary file to read NAR into")]
     CreateTempFile(#[source] io::Error),
     #[display("couldn't finish compressing NAR")]
@@ -170,6 +173,7 @@ pub(crate) async fn run<Ctx: Context>(
     let (token_tx, token_rx) = flume::unbounded();
 
     let mut store_closures = FuturesUnordered::new();
+    let mut narinfo_lookups = FuturesUnordered::new();
     let mut handle_store_paths = FuturesUnordered::new();
     let mut pending_handle_store_paths = VecDeque::new();
     let mut store_paths_waiting_for_token = Vec::new();
@@ -201,10 +205,24 @@ pub(crate) async fn run<Ctx: Context>(
         }
     };
 
+    let lookup_missing_narinfos_fut =
+        |paths: Vec<StorePath<StoreDir>>, token: Token| {
+            let cache = cache.clone();
+            async move {
+                let store_hashes =
+                    paths.iter().map(|path| *path.hash()).collect::<Vec<_>>();
+                let result =
+                    cache.missing_narinfos(&token, &store_hashes).await;
+                (result, paths, token)
+            }
+        };
+
     loop {
-        // The store paths waiting for the token are handled once it's fetched.
+        // The store paths waiting for the token are handled once it's fetched,
+        // and the ones being looked up once the cache answers.
         if stop_progress_writer.is_some()
             && store_closures.is_empty()
+            && narinfo_lookups.is_empty()
             && !matches!(token_state, TokenState::Fetching)
         {
             break;
@@ -245,35 +263,35 @@ pub(crate) async fn run<Ctx: Context>(
             closure_res = store_closures.select_next_some() => {
                 match closure_res {
                     Ok(store_paths) => {
-                        for path in store_paths {
-                            // Skip handling this path if we've already seen it.
-                            if !seen_store_hashes.insert(*path.hash()) {
-                                continue;
-                            }
+                        // Skip handling the paths we've already seen.
+                        let new_paths = store_paths
+                            .into_iter()
+                            .filter(|path| seen_store_hashes.insert(*path.hash()))
+                            .collect::<Vec<_>>();
 
-                            let token = match &token_state {
-                                TokenState::Fetched(token) => token.clone(),
-                                TokenState::Fetching => {
-                                    store_paths_waiting_for_token.push(path);
-                                    continue;
-                                },
-                                TokenState::NotFetched => unreachable!(
-                                    "the token is fetched when the first store \
-                                    path is pushed"
-                                ),
-                                TokenState::Failed => {
-                                    report.num_paths_without_token += 1;
-                                    continue;
-                                },
-                            };
+                        if new_paths.is_empty() {
+                            continue;
+                        }
 
-                            let fut = handle_store_path_fut(path, token);
-
-                            if handle_store_paths.len() < MAX_CONCURRENT_STORE_PATHS {
-                                handle_store_paths.push(ctx.spawner().spawn(fut));
-                            } else {
-                                pending_handle_store_paths.push_back(fut);
-                            }
+                        match &token_state {
+                            TokenState::Fetched(token) => {
+                                let fut = lookup_missing_narinfos_fut(
+                                    new_paths,
+                                    token.clone(),
+                                );
+                                narinfo_lookups.push(ctx.spawner().spawn(fut));
+                            },
+                            TokenState::Fetching => {
+                                store_paths_waiting_for_token.extend(new_paths);
+                            },
+                            TokenState::NotFetched => unreachable!(
+                                "the token is fetched when the first store \
+                                path is pushed"
+                            ),
+                            TokenState::Failed => {
+                                report.num_paths_without_token +=
+                                    new_paths.len() as u32;
+                            },
                         }
                     },
                     Err(tuple) => report.path_closure_errors.push(tuple),
@@ -282,14 +300,12 @@ pub(crate) async fn run<Ctx: Context>(
             token_event = token_rx.recv_async() => {
                 match token_event.expect("token_tx is still alive") {
                     TokenEvent::Fetched(token) => {
-                        for path in store_paths_waiting_for_token.drain(..) {
-                            let fut = handle_store_path_fut(path, token.clone());
-
-                            if handle_store_paths.len() < MAX_CONCURRENT_STORE_PATHS {
-                                handle_store_paths.push(ctx.spawner().spawn(fut));
-                            } else {
-                                pending_handle_store_paths.push_back(fut);
-                            }
+                        if !store_paths_waiting_for_token.is_empty() {
+                            let fut = lookup_missing_narinfos_fut(
+                                mem::take(&mut store_paths_waiting_for_token),
+                                token.clone(),
+                            );
+                            narinfo_lookups.push(ctx.spawner().spawn(fut));
                         }
                         token_state = TokenState::Fetched(token);
                     },
@@ -300,6 +316,30 @@ pub(crate) async fn run<Ctx: Context>(
                         report.token_error = Some(err);
                         token_state = TokenState::Failed;
                     },
+                }
+            },
+            (result, paths, token) = narinfo_lookups.select_next_some() => {
+                let mut missing = match result {
+                    Ok(missing) => missing.into_iter().peekable(),
+                    Err(err) => {
+                        report.narinfo_lookup_errors.push((paths.len() as u32, err));
+                        continue;
+                    },
+                };
+
+                for path in paths {
+                    if missing.next_if_eq(path.hash()).is_none() {
+                        report.num_paths_skipped += 1;
+                        continue;
+                    }
+
+                    let fut = handle_store_path_fut(path, token.clone());
+
+                    if handle_store_paths.len() < MAX_CONCURRENT_STORE_PATHS {
+                        handle_store_paths.push(ctx.spawner().spawn(fut));
+                    } else {
+                        pending_handle_store_paths.push_back(fut);
+                    }
                 }
             },
             (result, path) = handle_store_paths.select_next_some() => {
@@ -416,11 +456,11 @@ async fn fetch_and_refresh_token<F: TokenFetcher>(
     }
 }
 
-/// Handles the given store path by first checking if it's already cached, then
-/// uploading the path's NAR (compressed) and NARInfo if it isn't.
+/// Handles the given store path by uploading its NAR (compressed) and NARInfo,
+/// unless an upstream cache has it.
 ///
-/// Returns the total number of bytes pushed to the cache, or `None` if the path
-/// was cached.
+/// Returns the total number of bytes pushed to the cache, or `None` if an
+/// upstream cache has the path.
 async fn handle_store_path<C: Cache, H: HttpClient, N: Nix>(
     store_path: &StorePath<StoreDir>,
     token: &Token,
@@ -431,15 +471,12 @@ async fn handle_store_path<C: Cache, H: HttpClient, N: Nix>(
 ) -> Result<Option<NonZeroU64>, HandlePathError<C, N>> {
     let narinfo_filename = NarInfoFileName { store_hash: *store_path.hash() };
 
-    if !should_push_store_path(
+    if upstream_caches_have_narinfo(
         &narinfo_filename,
-        token,
         upstream_caches,
-        cache,
         http_client,
     )
     .await
-    .map_err(HandlePathError::CheckNarInfoExistence)?
     {
         return Ok(None);
     }
@@ -530,42 +567,6 @@ async fn handle_store_path<C: Cache, H: HttpClient, N: Nix>(
     Ok(NonZeroU64::new(nar_size_pushed.saturating_add(narinfo_size)))
 }
 
-async fn should_push_store_path<C: Cache, H: HttpClient>(
-    narinfo_filename: &NarInfoFileName,
-    token: &Token,
-    upstream_caches: &mut [url::Url],
-    cache: &C,
-    http_client: &H,
-) -> Result<bool, C::Error> {
-    let cache_has_narinfo = cache.has_narinfo(token, narinfo_filename);
-
-    let upstream_has_narinfo = upstream_caches_have_narinfo(
-        narinfo_filename,
-        upstream_caches,
-        http_client,
-    );
-
-    futures::pin_mut!(cache_has_narinfo, upstream_has_narinfo);
-
-    match future::select(cache_has_narinfo, upstream_has_narinfo).await {
-        future::Either::Left((Ok(true), _)) => Ok(false),
-        future::Either::Left((Ok(false), upstream_has_narinfo)) => {
-            Ok(!upstream_has_narinfo.await)
-        },
-        future::Either::Left((Err(err), upstream_has_narinfo)) => {
-            if upstream_has_narinfo.await {
-                Ok(false)
-            } else {
-                Err(err)
-            }
-        },
-        future::Either::Right((true, _)) => Ok(false),
-        future::Either::Right((false, cache_has_narinfo)) => {
-            Ok(!cache_has_narinfo.await?)
-        },
-    }
-}
-
 async fn upstream_caches_have_narinfo<H: HttpClient>(
     narinfo_filename: &NarInfoFileName,
     upstream_caches: &mut [url::Url],
@@ -608,6 +609,7 @@ impl<Ctx: Context> Default for ActionReport<Ctx> {
             num_paths_skipped: 0,
             num_paths_without_token: 0,
             token_error: None,
+            narinfo_lookup_errors: Default::default(),
             path_closure_errors: Default::default(),
             path_handling_errors: Default::default(),
         }

@@ -2,7 +2,7 @@ use core::convert::Infallible;
 use core::num::NonZeroU64;
 
 use futures::AsyncRead;
-use nix_types::{NarFileName, NarInfo, NarInfoFileName};
+use nix_types::{NarFileName, NarInfo, NarInfoFileName, StoreHash};
 
 use crate::context::Cache;
 use crate::protocol::StoreDir;
@@ -14,12 +14,12 @@ pub(crate) struct NoopCache {}
 impl Cache for NoopCache {
     type Error = Infallible;
 
-    async fn has_narinfo(
+    async fn missing_narinfos(
         &self,
         _: &Token,
-        _: &NarInfoFileName,
-    ) -> Result<bool, Self::Error> {
-        Ok(false)
+        store_hashes: &[StoreHash],
+    ) -> Result<Vec<StoreHash>, Self::Error> {
+        Ok(store_hashes.to_vec())
     }
 
     async fn upload_nar(
