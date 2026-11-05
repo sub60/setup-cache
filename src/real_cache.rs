@@ -112,6 +112,14 @@ struct Quoted<T>(T);
 
 pub(crate) struct ResponseBodySuffix<'a>(pub(crate) &'a str);
 
+trait RequestBuilderExt {
+    /// Sends the request, retrying it a few times on transport errors, 5xx,
+    /// and 429 responses.
+    ///
+    /// The request's body must not be a stream.
+    async fn send_with_retries(self) -> reqwest::Result<reqwest::Response>;
+}
+
 impl fmt::Display for ResponseBodySuffix<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.0.is_empty() {
@@ -135,6 +143,8 @@ impl RealCache {
             .push(&args.cache);
 
         let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .read_timeout(Duration::from_mins(2))
             .build()
             .map_err(RealCacheConnectError::BuildHttpClient)?;
 
@@ -162,7 +172,7 @@ impl RealCache {
                 }
                 .to_string(),
             )
-            .send()
+            .send_with_retries()
             .await
             .map_err(|source| CacheRequestError::HttpRequest {
                 method: Method::POST,
@@ -211,7 +221,7 @@ impl RealCache {
                 nar_multiparts_complete::RequestBody { etags, nar_file_name }
                     .to_string(),
             )
-            .send()
+            .send_with_retries()
             .await
             .map_err(|source| CacheRequestError::HttpRequest {
                 method: Method::POST,
@@ -307,7 +317,7 @@ impl RealCache {
                 }
                 .to_string(),
             )
-            .send()
+            .send_with_retries()
             .await
             .map_err(|source| CacheRequestError::HttpRequest {
                 method: Method::POST,
@@ -343,7 +353,7 @@ impl RealCache {
             .client
             .put(url.clone())
             .body(part_bytes)
-            .send()
+            .send_with_retries()
             .await
             .map_err(|source| CacheRequestError::HttpRequest {
                 method: Method::PUT,
@@ -525,7 +535,7 @@ impl context::Cache for RealCache {
                 .post(url.clone())
                 .header(header::AUTHORIZATION, token.authorization())
                 .body(missing_narinfos::StoreHashes(chunk.to_vec()).to_string())
-                .send()
+                .send_with_retries()
                 .await
                 .map_err(|source| CacheRequestError::HttpRequest {
                     method: Method::POST,
@@ -608,7 +618,7 @@ impl context::Cache for RealCache {
             .put(url.clone())
             .header(header::AUTHORIZATION, token.authorization())
             .body(nar_bytes)
-            .send()
+            .send_with_retries()
             .await
             .map_err(|source| CacheRequestError::HttpRequest {
                 method: Method::PUT,
@@ -644,7 +654,7 @@ impl context::Cache for RealCache {
             .put(url.clone())
             .header(header::AUTHORIZATION, token.authorization())
             .body(narinfo)
-            .send()
+            .send_with_retries()
             .await
             .map_err(|source| CacheRequestError::HttpRequest {
                 method: Method::PUT,
@@ -664,6 +674,37 @@ impl context::Cache for RealCache {
     }
 }
 
+impl RequestBuilderExt for reqwest::RequestBuilder {
+    async fn send_with_retries(self) -> reqwest::Result<reqwest::Response> {
+        let mut retry_delays = [1, 2, 4].map(Duration::from_secs).into_iter();
+        let mut request = self;
+
+        loop {
+            let next_request =
+                request.try_clone().expect("the request's body isn't a stream");
+
+            let result = request.send().await;
+
+            let is_transient = match &result {
+                Ok(response) => {
+                    response.status().is_server_error()
+                        || response.status() == StatusCode::TOO_MANY_REQUESTS
+                },
+                // Every error sending a request is a transport error, except
+                // building it.
+                Err(err) => !err.is_builder(),
+            };
+
+            match retry_delays.next() {
+                Some(delay) if is_transient => tokio::time::sleep(delay).await,
+                _ => return result,
+            }
+
+            request = next_request;
+        }
+    }
+}
+
 impl<T: FromStr> FromStr for Quoted<T> {
     type Err = QuotedFromStrError<T::Err>;
 
@@ -679,7 +720,127 @@ impl<T: FromStr> FromStr for Quoted<T> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{self, AtomicUsize};
+
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::net::TcpListener;
+
     use super::*;
+    use crate::context::Cache as _;
+    use crate::tokio::Tokio;
+
+    /// The response a test server gives to a connection, or `None` to close it
+    /// without responding.
+    type TestResponse = Option<(&'static str, &'static str)>;
+
+    /// Starts a server that gives the given responses, one per connection and
+    /// in order, and returns the cache it serves, and the number of
+    /// connections it accepted.
+    async fn serve(
+        responses: Vec<TestResponse>,
+    ) -> (RealCache, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let num_connections = Arc::new(AtomicUsize::new(0));
+
+        let num_accepted = num_connections.clone();
+        tokio::spawn(async move {
+            for response in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                num_accepted.fetch_add(1, atomic::Ordering::Relaxed);
+                let mut request = [0; 4096];
+                let _ = socket.read(&mut request).await;
+                if let Some((status, body)) = response {
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: \
+                         {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                }
+                let _ = socket.shutdown().await;
+            }
+        });
+
+        let cache = RealCache {
+            cache_url: format!("http://{addr}/namespace/cache")
+                .parse()
+                .unwrap(),
+            client: reqwest::Client::new(),
+        };
+
+        (cache, num_connections)
+    }
+
+    fn token() -> SharedToken {
+        SharedToken::new("token".parse().unwrap())
+    }
+
+    fn store_hash() -> StoreHash {
+        "00000000000000000000000000000000".parse().unwrap()
+    }
+
+    #[test]
+    fn dropped_connections_are_retried() {
+        Tokio::new().block_on(async {
+            let (cache, num_connections) = serve(vec![
+                None,
+                Some(("200 OK", "00000000000000000000000000000000\n")),
+            ])
+            .await;
+
+            let missing = cache
+                .missing_narinfos(&token(), &[store_hash()])
+                .await
+                .unwrap();
+
+            assert_eq!(missing, [store_hash()]);
+            assert_eq!(num_connections.load(atomic::Ordering::Relaxed), 2);
+        });
+    }
+
+    #[test]
+    fn server_errors_are_retried() {
+        Tokio::new().block_on(async {
+            let (cache, num_connections) = serve(vec![
+                Some(("503 Service Unavailable", "")),
+                Some(("200 OK", "")),
+            ])
+            .await;
+
+            let missing = cache
+                .missing_narinfos(&token(), &[store_hash()])
+                .await
+                .unwrap();
+
+            assert!(missing.is_empty());
+            assert_eq!(num_connections.load(atomic::Ordering::Relaxed), 2);
+        });
+    }
+
+    #[test]
+    fn client_errors_are_not_retried() {
+        Tokio::new().block_on(async {
+            let (cache, num_connections) = serve(vec![
+                Some(("400 Bad Request", "")),
+                Some(("200 OK", "")),
+            ])
+            .await;
+
+            let result =
+                cache.missing_narinfos(&token(), &[store_hash()]).await;
+
+            assert!(matches!(
+                result,
+                Err(CacheRequestError::UnexpectedResponse {
+                    status: StatusCode::BAD_REQUEST,
+                    ..
+                })
+            ));
+            assert_eq!(num_connections.load(atomic::Ordering::Relaxed), 1);
+        });
+    }
 
     #[test]
     fn s3_error_message_is_extracted() {
