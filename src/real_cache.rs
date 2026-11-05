@@ -1,8 +1,8 @@
+use core::fmt;
 use core::num::{NonZeroU16, NonZeroU64};
 use core::pin::pin;
 use core::str::FromStr;
 use core::time::Duration;
-use core::{fmt, iter};
 use std::collections::VecDeque;
 use std::io;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -58,6 +58,8 @@ pub(crate) enum CacheRequestError {
         #[source]
         source: header::ToStrError,
     },
+    #[display("cache didn't return an upload URL for part {_0}")]
+    MissingPartUrl(NonZeroU16),
     #[display("missing {header} header from {method} {url}")]
     MissingResponseHeader {
         method: Method,
@@ -372,19 +374,28 @@ impl RealCache {
         &self,
         token: &Token,
         nar_file_name: &NarFileName,
+        nar_size: NonZeroU64,
         initiate_body: &nar_multiparts::ResponseBody,
         nar_bytes: impl AsyncRead + Send + 'static,
     ) -> Result<SmallVec<[Etag; 8]>, CacheRequestError> {
         let part_size = initiate_body.part_size.get() as usize;
-        let mut part_urls = VecDeque::from(initiate_body.parts_urls.clone());
+
+        // The cache only gives out URLs for the parts the NAR's size has.
+        let num_parts = u16::try_from(
+            nar_size.get().div_ceil(initiate_body.part_size.get().into()),
+        )
+        .map_err(|_| CacheRequestError::TooManyNarParts)?;
+
+        let mut part_urls =
+            initiate_body.parts_urls.iter().cloned().collect::<VecDeque<_>>();
+
         let mut urls_expiration_ts = initiate_body.expiration_ts;
 
         let mut nar_bytes = pin!(nar_bytes);
-        let mut part_number = NonZeroU16::MIN;
         let mut etags = SmallVec::new();
         let mut part_bytes_buf = BytesMut::zeroed(part_size);
 
-        loop {
+        for part_number in (1..=num_parts).filter_map(NonZeroU16::new) {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .expect("we're past the UNIX epoch");
@@ -396,12 +407,10 @@ impl RealCache {
                 part_urls.clear();
             }
 
-            let Some(part_url) = part_urls.pop_front() else {
-                let new_part_numbers =
-                    iter::successors(Some(part_number), |part_number| {
-                        part_number.checked_add(1)
-                    })
+            if part_urls.is_empty() {
+                let new_part_numbers = (part_number.get()..=num_parts)
                     .take(4)
+                    .filter_map(NonZeroU16::new)
                     .collect::<SmallVec<_>>();
                 let parts = self
                     .request_part_urls(
@@ -413,18 +422,17 @@ impl RealCache {
                     .await?;
                 part_urls.extend(parts.urls);
                 urls_expiration_ts = parts.expiration_ts;
-                continue;
-            };
+            }
+
+            let part_url = part_urls
+                .pop_front()
+                .ok_or(CacheRequestError::MissingPartUrl(part_number))?;
 
             let num_read = nar_bytes
                 .as_mut()
                 .try_fill(&mut part_bytes_buf[..])
                 .await
                 .map_err(CacheRequestError::ReadNar)?;
-
-            if num_read == 0 {
-                break;
-            }
 
             part_bytes_buf.truncate(num_read);
 
@@ -435,17 +443,9 @@ impl RealCache {
 
             etags.push(etag);
 
-            if num_read < part_size {
-                break;
-            }
-
             part_bytes_buf = part_bytes
                 .try_into_mut()
                 .unwrap_or_else(|_| BytesMut::zeroed(part_size));
-
-            part_number = part_number
-                .checked_add(1)
-                .ok_or(CacheRequestError::TooManyNarParts)?;
         }
 
         Ok(etags)
@@ -537,6 +537,7 @@ impl context::Cache for RealCache {
             .upload_nar_multiparts(
                 token,
                 &nar_file_name,
+                nar_size,
                 &initiate_body,
                 nar_bytes,
             )
