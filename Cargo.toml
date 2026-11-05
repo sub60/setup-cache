@@ -15,7 +15,6 @@ clap = { version = "4.5", features = ["derive", "env"] }
 derive_more = { version = "2", default-features = false, features = [
   "display",
 ] }
-either = "1"
 flume = { version = "0.12" }
 futures = { version = "0.3" }
 http = "1"
