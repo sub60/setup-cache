@@ -137,12 +137,13 @@ impl RealCache {
         Ok(Self { cache_url, client, spawner })
     }
 
-    /// Initiates a multipart upload for the given NAR, returning `None` if the
-    /// cache already contains it.
+    /// Initiates a multipart upload for a NAR of the given size, returning
+    /// `None` if the cache already contains it.
     async fn initiate_multipart_nar_upload(
         &self,
         token: &Token,
         nar_file_name: &NarFileName,
+        nar_size: NonZeroU64,
     ) -> Result<Option<nar_multiparts::ResponseBody>, CacheRequestError> {
         let url = self.nar_multiparts_url();
 
@@ -150,7 +151,13 @@ impl RealCache {
             .client
             .post(url.clone())
             .header(header::AUTHORIZATION, token.authorization())
-            .body(nar_file_name.to_string())
+            .body(
+                nar_multiparts::RequestBody {
+                    nar_file_name: nar_file_name.clone(),
+                    file_size: nar_size,
+                }
+                .to_string(),
+            )
             .send()
             .await
             .map_err(|source| CacheRequestError::HttpRequest {
@@ -507,8 +514,9 @@ impl context::Cache for RealCache {
         nar_size: NonZeroU64,
         nar_bytes: impl AsyncRead + Send + 'static,
     ) -> Result<u64, Self::Error> {
-        let Some(initiate_body) =
-            self.initiate_multipart_nar_upload(token, &nar_file_name).await?
+        let Some(initiate_body) = self
+            .initiate_multipart_nar_upload(token, &nar_file_name, nar_size)
+            .await?
         else {
             return Ok(0);
         };

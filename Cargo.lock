@@ -1205,7 +1205,7 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 [[package]]
 name = "nix-types"
 version = "0.1.0"
-source = "git+https://github.com/sub60/cache.git#c812ed64e9eba0c35ac4801fa5f451c8c5c71ca6"
+source = "git+https://github.com/sub60/cache.git#95e772ae7468667c1a27bdd695083d5503ad2f7b"
 dependencies = [
  "base64 0.22.1",
  "cauchy",
@@ -1857,7 +1857,7 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 [[package]]
 name = "sub60-cache-api"
 version = "0.1.0"
-source = "git+https://github.com/sub60/cache.git#c812ed64e9eba0c35ac4801fa5f451c8c5c71ca6"
+source = "git+https://github.com/sub60/cache.git#95e772ae7468667c1a27bdd695083d5503ad2f7b"
 dependencies = [
  "cauchy",
  "const_format",
@@ -1876,7 +1876,7 @@ dependencies = [
 [[package]]
 name = "sub60-cache-api-macros"
 version = "0.1.0"
-source = "git+https://github.com/sub60/cache.git#c812ed64e9eba0c35ac4801fa5f451c8c5c71ca6"
+source = "git+https://github.com/sub60/cache.git#95e772ae7468667c1a27bdd695083d5503ad2f7b"
 dependencies = [
  "proc-macro2",
  "quote",
