@@ -9,7 +9,9 @@ use crate::protocol::StoreDir;
 use crate::{context, event_loop};
 
 pub(crate) struct RealStopProgressReporter<W> {
-    reported_paths_left_to_handle: bool,
+    /// Whether there were still store paths to handle when the daemon was told
+    /// to stop.
+    had_paths_left_to_handle: bool,
     writer: W,
 }
 
@@ -32,7 +34,7 @@ enum WithCauses<'a> {
 
 impl<W> RealStopProgressReporter<W> {
     pub(crate) fn new(writer: W) -> Self {
-        Self { reported_paths_left_to_handle: false, writer }
+        Self { had_paths_left_to_handle: false, writer }
     }
 }
 
@@ -46,12 +48,14 @@ impl<W: AsyncWrite + Unpin> context::StopProgressReporter
         if num_paths_left_to_handle == 0 {
             return;
         }
+        // The progress lines go in a group, which GitHub shows folded, and
+        // which the final report closes.
         let msg = format!(
-            "Handling the remaining {}\n",
+            "::group::Handling the remaining {}\n",
             Count(num_paths_left_to_handle, "store path")
         );
         let _ = self.writer.write_all(msg.as_bytes()).await;
-        self.reported_paths_left_to_handle = true;
+        self.had_paths_left_to_handle = true;
     }
 
     async fn report_path_pushed(
@@ -83,9 +87,8 @@ impl<W: AsyncWrite + Unpin> context::StopProgressReporter
     ) {
         let mut msg = String::new();
 
-        // An empty line separates the report from the progress lines.
-        if self.reported_paths_left_to_handle {
-            msg.push('\n');
+        if self.had_paths_left_to_handle {
+            msg.push_str("::endgroup::\n");
         }
 
         msg.push_str(&FinalReport(&report).to_string());
