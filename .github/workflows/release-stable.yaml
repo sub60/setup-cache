@@ -30,7 +30,7 @@ jobs:
         uses: NixOS/nix-installer-action@main
 
       - name: Setup SSH keys for private flake inputs
-        uses: webfactory/ssh-agent@v0.9.1
+        uses: webfactory/ssh-agent@v0.10.0
         with:
           ssh-private-key: ${{ secrets.NOIB3_NIX_JETTISON_SSH_KEY }}
 

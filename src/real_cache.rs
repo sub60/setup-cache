@@ -342,7 +342,7 @@ impl RealCache {
             })?;
 
         if !response.status().is_success() {
-            return Err(CacheRequestError::unexpected_response(
+            return Err(CacheRequestError::unexpected_s3_response(
                 response,
                 Method::PUT,
                 url,
@@ -467,6 +467,32 @@ impl CacheRequestError {
             }),
         }
     }
+
+    /// Like [`Self::unexpected_response()`], for a response from the bucket's
+    /// S3 API, whose errors are XML documents of which only the message is
+    /// kept.
+    async fn unexpected_s3_response(
+        response: reqwest::Response,
+        method: Method,
+        url: url::Url,
+    ) -> Self {
+        let mut error = Self::unexpected_response(response, method, url).await;
+
+        if let Self::UnexpectedResponse { body, .. } = &mut error
+            && let Some(message) = s3_error_message(body)
+        {
+            *body = message.to_owned();
+        }
+
+        error
+    }
+}
+
+/// Returns the message of the given S3 error document, if it has one.
+fn s3_error_message(xml: &str) -> Option<&str> {
+    let start = xml.find("<Message>")? + "<Message>".len();
+    let len = xml[start..].find("</Message>")?;
+    Some(&xml[start..start + len])
 }
 
 impl context::Cache for RealCache {
@@ -602,5 +628,25 @@ impl<T: FromStr> FromStr for Quoted<T> {
             .parse()
             .map(Self)
             .map_err(QuotedFromStrError::Inner)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn s3_error_message_is_extracted() {
+        let xml = "<?xml version=\"1.0\" \
+                   encoding=\"UTF-8\"?><Error><Code>InternalError</\
+                   Code><Message>We encountered an internal error. Please try \
+                   again.</Message></Error>";
+
+        assert_eq!(
+            s3_error_message(xml),
+            Some("We encountered an internal error. Please try again.")
+        );
+
+        assert_eq!(s3_error_message("not an S3 error"), None);
     }
 }
