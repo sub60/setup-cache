@@ -34,7 +34,7 @@ impl AnyCache {
     pub(crate) async fn new(
         args: &RunArgs,
     ) -> Result<Self, RealCacheConnectError> {
-        match args.cache {
+        match args.cache_kind {
             AnyCacheKind::Noop => Ok(NoopCache::default().into()),
             AnyCacheKind::Real => {
                 RealCache::connect(args).await.map(Into::into)
@@ -45,6 +45,9 @@ impl AnyCache {
 
 impl Cache for AnyCache {
     type Error = AnyCacheError;
+
+    const MAX_SINGLE_PART_NAR_SIZE: u64 =
+        <RealCache as Cache>::MAX_SINGLE_PART_NAR_SIZE;
 
     async fn missing_narinfos(
         &self,
@@ -63,7 +66,7 @@ impl Cache for AnyCache {
         }
     }
 
-    async fn upload_nar(
+    async fn upload_nar_multipart(
         &self,
         token: &SharedToken,
         nar_file_name: NarFileName,
@@ -72,11 +75,29 @@ impl Cache for AnyCache {
     ) -> Result<u64, Self::Error> {
         match self {
             Self::Noop(cache) => cache
-                .upload_nar(token, nar_file_name, nar_size, nar_bytes)
+                .upload_nar_multipart(token, nar_file_name, nar_size, nar_bytes)
                 .await
                 .map_err(Into::into),
             Self::Real(cache) => cache
-                .upload_nar(token, nar_file_name, nar_size, nar_bytes)
+                .upload_nar_multipart(token, nar_file_name, nar_size, nar_bytes)
+                .await
+                .map_err(Into::into),
+        }
+    }
+
+    async fn upload_nar_single_part(
+        &self,
+        token: &SharedToken,
+        nar_file_name: NarFileName,
+        nar_bytes: Vec<u8>,
+    ) -> Result<u64, Self::Error> {
+        match self {
+            Self::Noop(cache) => cache
+                .upload_nar_single_part(token, nar_file_name, nar_bytes)
+                .await
+                .map_err(Into::into),
+            Self::Real(cache) => cache
+                .upload_nar_single_part(token, nar_file_name, nar_bytes)
                 .await
                 .map_err(Into::into),
         }

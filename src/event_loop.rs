@@ -10,6 +10,7 @@ use futures::io::{BufWriter, Cursor};
 use futures::stream::{FusedStream, FuturesUnordered};
 use futures::{
     AsyncRead,
+    AsyncReadExt,
     AsyncSeekExt,
     AsyncWrite,
     AsyncWriteExt,
@@ -107,6 +108,8 @@ pub(crate) enum HandlePathError<C: Cache, N: Nix> {
     GetPathInfos(#[source] N::PathInfosError),
     #[display("couldn't read NAR from store")]
     ReadNar(#[source] N::ReadNarError),
+    #[display("couldn't read NAR buffer")]
+    ReadNarBuffer(#[source] io::Error),
     #[display("read zero bytes from {_0}'s NAR")]
     ReadZeroNarBytes(StorePath<StoreDir>),
     #[display("couldn't rewind NAR buffer's cursor")]
@@ -123,19 +126,18 @@ enum Event<Writer> {
 }
 
 pin_project! {
-    /// An [`AsyncWrite`] adapter which maintains a running SHA-256 hash of the
-    /// written bytes and counts how many bytes were successfully written.
-    struct HashAndCountWriter<W> {
+    /// An [`AsyncWrite`] adapter which counts how many bytes were successfully
+    /// written.
+    struct CountWriter<W> {
         #[pin]
         inner: W,
-        sha256: Sha256,
         num_bytes_written: u64,
     }
 }
 
-impl<W> HashAndCountWriter<W> {
+impl<W> CountWriter<W> {
     fn new(writer: W) -> Self {
-        Self { inner: writer, sha256: Sha256::new(), num_bytes_written: 0 }
+        Self { inner: writer, num_bytes_written: 0 }
     }
 }
 
@@ -435,7 +437,7 @@ async fn handle_store_path<C: Cache, H: HttpClient, N: Nix>(
         future::Either::Right(file)
     };
 
-    let mut nar_encoder = ZstdEncoder::new(HashAndCountWriter::new(nar_buf));
+    let mut nar_encoder = ZstdEncoder::new(CountWriter::new(nar_buf));
 
     nix.read_nar(store_path, &mut nar_encoder)
         .await
@@ -445,32 +447,67 @@ async fn handle_store_path<C: Cache, H: HttpClient, N: Nix>(
 
     let writer = nar_encoder.into_inner();
 
-    let file_hash = Nix32Digest::new(&writer.sha256.finalize().into());
-
     let file_size = NonZeroU64::new(writer.num_bytes_written)
         .ok_or_else(|| HandlePathError::ReadZeroNarBytes(store_path.clone()))?;
 
-    let nar_file_name = NarFileName {
-        file_hash,
-        extension: NAR_COMPRESSION_ALGORITHM.extension(),
-    };
-
     let mut nar_buf = writer.inner;
 
-    // Rewind the buffer's cursor to let the cache read its contents from the
-    // beginning.
     nar_buf
         .seek(io::SeekFrom::Start(0))
         .await
         .map_err(HandlePathError::RewindNarBuffer)?;
 
+    let extension = NAR_COMPRESSION_ALGORITHM.extension();
+
     // Just like `nix copy --to`, we write the NAR *before* the NARInfo to avoid
     // the cache server temporarily reporting false positives.
 
-    let nar_size_pushed = cache
-        .upload_nar(token, nar_file_name, file_size, nar_buf)
-        .await
-        .map_err(HandlePathError::UploadNar)?;
+    let (file_hash, nar_size_pushed) = if file_size.get()
+        <= C::MAX_SINGLE_PART_NAR_SIZE
+    {
+        let mut nar_bytes = Vec::with_capacity(file_size.get() as usize);
+
+        nar_buf
+            .read_to_end(&mut nar_bytes)
+            .await
+            .map_err(HandlePathError::ReadNarBuffer)?;
+
+        let file_hash = Nix32Digest::new(&Sha256::digest(&nar_bytes).into());
+
+        let nar_size_pushed = cache
+            .upload_nar_single_part(
+                token,
+                NarFileName { file_hash, extension },
+                nar_bytes,
+            )
+            .await
+            .map_err(HandlePathError::UploadNar)?;
+
+        (file_hash, nar_size_pushed)
+    } else {
+        // Multipart uploads are started with the NAR's file name, so the NAR
+        // is read once to hash it, and again to upload it.
+        let file_hash = sha256(&mut nar_buf)
+            .await
+            .map_err(HandlePathError::ReadNarBuffer)?;
+
+        nar_buf
+            .seek(io::SeekFrom::Start(0))
+            .await
+            .map_err(HandlePathError::RewindNarBuffer)?;
+
+        let nar_size_pushed = cache
+            .upload_nar_multipart(
+                token,
+                NarFileName { file_hash, extension },
+                file_size,
+                nar_buf,
+            )
+            .await
+            .map_err(HandlePathError::UploadNar)?;
+
+        (file_hash, nar_size_pushed)
+    };
 
     let narinfo = || -> Result<_, N::PathInfosError> {
         Ok(NarInfo {
@@ -495,6 +532,23 @@ async fn handle_store_path<C: Cache, H: HttpClient, N: Nix>(
         .map_err(HandlePathError::UploadNarInfo)?;
 
     Ok(NonZeroU64::new(nar_size_pushed.saturating_add(narinfo_size)))
+}
+
+/// Returns the SHA-256 hash of the bytes the given reader reads until its end.
+async fn sha256(
+    mut reader: impl AsyncRead + Unpin,
+) -> io::Result<Nix32Digest<32>> {
+    let mut sha256 = Sha256::new();
+    let mut buf = vec![0; 64 * 1024];
+
+    loop {
+        match reader.read(&mut buf).await? {
+            0 => break,
+            num_read => sha256.update(&buf[..num_read]),
+        }
+    }
+
+    Ok(Nix32Digest::new(&sha256.finalize().into()))
 }
 
 async fn upstream_caches_have_narinfo<H: HttpClient>(
@@ -545,7 +599,7 @@ impl<Ctx: Context> Default for ActionReport<Ctx> {
     }
 }
 
-impl<W: AsyncWrite> AsyncWrite for HashAndCountWriter<W> {
+impl<W: AsyncWrite> AsyncWrite for CountWriter<W> {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut TaskContext<'_>,
@@ -554,7 +608,6 @@ impl<W: AsyncWrite> AsyncWrite for HashAndCountWriter<W> {
         let this = self.project();
         match this.inner.poll_write(cx, buf) {
             Poll::Ready(Ok(num_bytes)) => {
-                this.sha256.update(&buf[..num_bytes]);
                 *this.num_bytes_written += num_bytes as u64;
                 Poll::Ready(Ok(num_bytes))
             },

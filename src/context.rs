@@ -44,6 +44,11 @@ pub trait Context {
 pub trait Cache: Clone + Send + Sync + 'static {
     type Error: Error + Send;
 
+    /// The size, in bytes, up to which NARs are uploaded with
+    /// [`upload_nar_single_part()`](Self::upload_nar_single_part) instead of
+    /// [`upload_nar_multipart()`](Self::upload_nar_multipart).
+    const MAX_SINGLE_PART_NAR_SIZE: u64;
+
     /// Returns the store hashes of the NARInfos the cache doesn't have, in the
     /// same order as they appear in `store_hashes`.
     fn missing_narinfos(
@@ -52,14 +57,25 @@ pub trait Cache: Clone + Send + Sync + 'static {
         store_hashes: &[StoreHash],
     ) -> impl Future<Output = Result<Vec<StoreHash>, Self::Error>> + Send;
 
-    /// Uploads a NAR and returns the number of bytes added to the cache. Returns
-    /// zero if an equivalent NAR was already present.
-    fn upload_nar(
+    /// Uploads a NAR of the given size in multiple parts, and returns the
+    /// number of bytes added to the cache. Returns zero if an equivalent NAR
+    /// was already present.
+    fn upload_nar_multipart(
         &self,
         token: &SharedToken,
         nar_file_name: NarFileName,
         nar_size: NonZeroU64,
         nar_bytes: impl AsyncRead + Send + 'static,
+    ) -> impl Future<Output = Result<u64, Self::Error>> + Send;
+
+    /// Uploads a NAR in a single request, and returns the number of bytes
+    /// added to the cache. Returns zero if an equivalent NAR was already
+    /// present.
+    fn upload_nar_single_part(
+        &self,
+        token: &SharedToken,
+        nar_file_name: NarFileName,
+        nar_bytes: Vec<u8>,
     ) -> impl Future<Output = Result<u64, Self::Error>> + Send;
 
     /// Uploads a NARInfo and returns the number of bytes added to the cache.

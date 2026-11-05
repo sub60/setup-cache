@@ -66,7 +66,7 @@ pub struct RunArgs {
 
     #[cfg(not(feature = "sub60-cache"))]
     #[arg(long, value_enum)]
-    pub(crate) cache: AnyCacheKind,
+    pub(crate) cache_kind: AnyCacheKind,
 }
 
 /// How the daemon started, when nothing went wrong setting it up.

@@ -278,6 +278,15 @@ impl RealCache {
         url
     }
 
+    fn nar_url(&self, nar_file_name: &NarFileName) -> url::Url {
+        let mut url = self.cache_url.clone();
+        url.path_segments_mut()
+            .expect("cache URL can be a base")
+            .push("nar")
+            .push(&nar_file_name.to_string());
+        url
+    }
+
     async fn request_part_urls(
         &self,
         token: &SharedToken,
@@ -370,7 +379,7 @@ impl RealCache {
             .map_err(CacheRequestError::ParseEtag)
     }
 
-    async fn upload_nar_multiparts(
+    async fn upload_nar_parts(
         &self,
         token: &SharedToken,
         nar_file_name: &NarFileName,
@@ -498,6 +507,9 @@ fn s3_error_message(xml: &str) -> Option<&str> {
 impl context::Cache for RealCache {
     type Error = CacheRequestError;
 
+    // The size of the cache's multipart parts.
+    const MAX_SINGLE_PART_NAR_SIZE: u64 = 16 * 1024 * 1024;
+
     async fn missing_narinfos(
         &self,
         token: &SharedToken,
@@ -545,7 +557,7 @@ impl context::Cache for RealCache {
         Ok(missing)
     }
 
-    async fn upload_nar(
+    async fn upload_nar_multipart(
         &self,
         token: &SharedToken,
         nar_file_name: NarFileName,
@@ -560,7 +572,7 @@ impl context::Cache for RealCache {
         };
 
         let etags = self
-            .upload_nar_multiparts(
+            .upload_nar_parts(
                 token,
                 &nar_file_name,
                 nar_size,
@@ -579,6 +591,40 @@ impl context::Cache for RealCache {
             .await?;
 
         Ok(if did_insert { nar_size.get() } else { 0 })
+    }
+
+    async fn upload_nar_single_part(
+        &self,
+        token: &SharedToken,
+        nar_file_name: NarFileName,
+        nar_bytes: Vec<u8>,
+    ) -> Result<u64, Self::Error> {
+        let nar_size = nar_bytes.len() as u64;
+
+        let url = self.nar_url(&nar_file_name);
+
+        let response = self
+            .client
+            .put(url.clone())
+            .header(header::AUTHORIZATION, token.authorization())
+            .body(nar_bytes)
+            .send()
+            .await
+            .map_err(|source| CacheRequestError::HttpRequest {
+                method: Method::PUT,
+                source,
+            })?;
+
+        match response.status() {
+            StatusCode::CREATED => Ok(nar_size),
+            StatusCode::NO_CONTENT => Ok(0),
+            _ => Err(CacheRequestError::unexpected_response(
+                response,
+                Method::PUT,
+                url,
+            )
+            .await),
+        }
     }
 
     async fn upload_narinfo(
