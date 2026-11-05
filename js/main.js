@@ -263,10 +263,15 @@ const writeHookScript = async (hookPath, binaryPath, socketPath) => {
 /**
  * @param {string} configPath
  * @param {string} hookPath
+ * @param {string} netrcPath
  * @returns {Promise<void>}
  */
-const writeNixConfig = async (configPath, hookPath) => {
-  const config = `post-build-hook = ${hookPath}\n`;
+const writeNixConfig = async (configPath, hookPath, netrcPath) => {
+  const config = [
+    `post-build-hook = ${hookPath}`,
+    `netrc-file = ${netrcPath}`,
+    "",
+  ].join("\n");
   await fsp.writeFile(configPath, config, { mode: 0o644 });
 };
 
@@ -297,8 +302,11 @@ const mergedUserConfFiles = (configPath) => {
 };
 
 /**
+ * Reads the status the daemon reports once it's ready, returning why it
+ * couldn't get a token, if it couldn't.
+ *
  * @param {import("node:stream").Readable} readyStream
- * @returns {Promise<void>}
+ * @returns {Promise<string | undefined>}
  */
 const readReady = async (readyStream) => {
   const chunks = [];
@@ -314,7 +322,7 @@ const readReady = async (readyStream) => {
   }
 
   if (message[0] === 0) {
-    return;
+    return undefined;
   }
 
   if (message[0] === 1) {
@@ -323,12 +331,19 @@ const readReady = async (readyStream) => {
     );
   }
 
+  if (message[0] === 2) {
+    return message.subarray(1).toString("utf8");
+  }
+
   throw new Error(`daemon reported unknown startup status ${message[0]}`);
 };
 
 /**
+ * Waits for the given daemon to report it's ready, failing if it can't be
+ * spawned.
+ *
  * @param {import("node:child_process").ChildProcess} child
- * @returns {Promise<void>}
+ * @returns {Promise<string | undefined>}
  */
 const waitForDaemonReady = async (child) => {
   const readyStream = child.stdio[3];
@@ -343,28 +358,19 @@ const waitForDaemonReady = async (child) => {
 
   /** @type {(error: Error) => void} */
   let onError = () => {};
-  /** @type {(code: number | null, signal: NodeJS.Signals | null) => void} */
-  let onExit = () => {};
 
-  const exitedEarly = new Promise((_, reject) => {
+  // The daemon exiting isn't raced, since Node can emit `exit` before the pipe
+  // is read. Exiting closes the pipe, which readReady handles.
+  /** @type {Promise<never>} */
+  const failedToSpawn = new Promise((_, reject) => {
     onError = reject;
-    onExit = (code, signal) => {
-      reject(
-        new Error(
-          `daemon exited before readiness: code=${code}, signal=${signal}`,
-        ),
-      );
-    };
-
     child.once("error", onError);
-    child.once("exit", onExit);
   });
 
   try {
-    await Promise.race([readReady(readableReadyStream), exitedEarly]);
+    return await Promise.race([readReady(readableReadyStream), failedToSpawn]);
   } finally {
     child.off("error", onError);
-    child.off("exit", onExit);
   }
 };
 
@@ -426,6 +432,7 @@ const main = async () => {
     const binaryPath = path.join(daemonDir, BINARY_NAME);
     const postBuildHookPath = path.join(daemonDir, "post-build-hook.sh");
     const configPath = path.join(daemonDir, "nix.conf");
+    const netrcPath = path.join(daemonDir, "netrc");
     const daemonLogPath = path.join(daemonDir, "daemon.log");
     const assetName = `${BINARY_NAME}-${target}.gz`;
     const actionRef =
@@ -448,6 +455,7 @@ const main = async () => {
       binary: binaryPath,
       config: configPath,
       daemonLog: daemonLogPath,
+      netrc: netrcPath,
       postBuildHook: postBuildHookPath,
       socket: socketPath,
     };
@@ -455,7 +463,7 @@ const main = async () => {
 
   await core.group("Start daemon", async () => {
     await writeHookScript(paths.postBuildHook, paths.binary, paths.socket);
-    await writeNixConfig(paths.config, paths.postBuildHook);
+    await writeNixConfig(paths.config, paths.postBuildHook, paths.netrc);
 
     const daemonArgs = [
       "run",
@@ -463,6 +471,8 @@ const main = async () => {
       paths.socket,
       "--ready-fd",
       "3",
+      "--netrc-file",
+      paths.netrc,
       "--origin",
       origin,
       "--namespace",
@@ -476,6 +486,8 @@ const main = async () => {
     }
 
     let child;
+    /** @type {string | undefined} */
+    let tokenError;
     try {
       const daemonLogFd = fs.openSync(paths.daemonLog, "a");
       try {
@@ -491,10 +503,18 @@ const main = async () => {
         fs.closeSync(daemonLogFd);
       }
 
-      await waitForDaemonReady(child);
+      tokenError = await waitForDaemonReady(child);
     } catch (error) {
       await printDaemonLog(paths.daemonLog);
       throw error;
+    }
+
+    if (tokenError !== undefined) {
+      core.warning(
+        `Store paths won't be pushed to the cache, because there's no token ` +
+          `to push them with: ${tokenError}`,
+      );
+      return;
     }
 
     core.saveState(STATE_SOCKET_PATH, paths.socket);

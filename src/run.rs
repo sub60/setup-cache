@@ -17,18 +17,21 @@ use tokio::net::{UnixListener, UnixStream};
 
 #[cfg(not(feature = "sub60-cache"))]
 use crate::any_cache::AnyCacheKind;
-use crate::event_loop;
+use crate::context::TokenFetcher as _;
 use crate::nix_store::NixStore;
 #[cfg(feature = "sub60-cache")]
 use crate::real_cache::RealCache;
 use crate::real_cache::{RealCacheConnectError, RealCacheRunArgs};
 use crate::real_context::RealContext;
+use crate::real_stop_progress_reporter::WithCauses;
 use crate::real_token_fetcher::{
+    FetchTokenError,
     NewRealTokenFetcherError,
     RealTokenFetcher,
     RealTokenFetcherArgs,
 };
 use crate::tokio::{Tokio, TokioSpawner};
+use crate::{event_loop, token};
 
 #[derive(Debug, clap::Args)]
 pub struct RunArgs {
@@ -37,6 +40,11 @@ pub struct RunArgs {
 
     #[arg(long)]
     ready_fd: Option<RawFd>,
+
+    /// The netrc file to write the token to, which Nix reads to authenticate
+    /// its requests to the cache.
+    #[arg(long)]
+    pub(crate) netrc_file: PathBuf,
 
     #[arg(
         long,
@@ -59,6 +67,16 @@ pub struct RunArgs {
     #[cfg(not(feature = "sub60-cache"))]
     #[arg(long, value_enum)]
     pub(crate) cache: AnyCacheKind,
+}
+
+/// How the daemon started, when nothing went wrong setting it up.
+enum Started<EventLoop> {
+    /// The daemon got the token, and runs the given event loop.
+    Running(EventLoop),
+
+    /// The daemon couldn't get the token, so there's nothing to push store
+    /// paths with and it doesn't run.
+    WithoutToken(FetchTokenError),
 }
 
 enum StartError {
@@ -84,7 +102,13 @@ pub(crate) fn run(args: RunArgs) {
         let mut ready_file = unsafe { File::from_raw_fd(ready_fd) };
 
         let mut signal_readiness = || match &start_res {
-            Ok(_) => ready_file.write_all(&[0]),
+            Ok(Started::Running(_)) => ready_file.write_all(&[0]),
+            Ok(Started::WithoutToken(fetch_error)) => {
+                ready_file.write_all(&[2])?;
+                ready_file.write_all(
+                    WithCauses::Inline(fetch_error).to_string().as_bytes(),
+                )
+            },
             Err(start_error) => {
                 ready_file.write_all(&[1])?;
                 ready_file.write_all(start_error.to_string().as_bytes())
@@ -97,7 +121,16 @@ pub(crate) fn run(args: RunArgs) {
     }
 
     match start_res {
-        Ok(run_event_loop) => tokio.block_on(run_event_loop),
+        Ok(Started::Running(run_event_loop)) => tokio.block_on(run_event_loop),
+        Ok(Started::WithoutToken(fetch_error)) => {
+            if ready_fd.is_none() {
+                eprintln!(
+                    "Couldn't get a token: {}",
+                    WithCauses::Inline(&fetch_error)
+                );
+            }
+            process::exit(1);
+        },
         Err(start_error) => {
             if ready_fd.is_none() {
                 eprintln!("{start_error}");
@@ -110,7 +143,7 @@ pub(crate) fn run(args: RunArgs) {
 async fn start(
     args: RunArgs,
     spawner: TokioSpawner,
-) -> Result<impl Future<Output = ()> + use<>, StartError> {
+) -> Result<Started<impl Future<Output = ()> + use<>>, StartError> {
     let listener =
         UnixListener::bind(&args.socket).map_err(StartError::BindSocket)?;
 
@@ -129,11 +162,27 @@ async fn start(
         RealTokenFetcher::new(&args.token_fetcher_args, args.origin.clone())
             .map_err(StartError::NewTokenFetcher)?;
 
-    let mut ctx = RealContext::new(nix_store, spawner, token_fetcher);
+    let (token, expiration) = match token_fetcher.fetch().await {
+        Ok(fetched_token) => fetched_token,
+        Err(fetch_error) => return Ok(Started::WithoutToken(fetch_error)),
+    };
 
-    Ok(async move {
-        event_loop::run(args, cache, UnixStreams { listener }, &mut ctx).await;
-    })
+    token::write_token(&token, &args.origin, &args.netrc_file);
+
+    let mut ctx = RealContext::new(nix_store, spawner);
+
+    Ok(Started::Running(async move {
+        event_loop::run(
+            args,
+            cache,
+            token,
+            expiration,
+            token_fetcher,
+            UnixStreams { listener },
+            &mut ctx,
+        )
+        .await;
+    }))
 }
 
 fn parse_upstream_caches(

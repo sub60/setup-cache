@@ -6,7 +6,7 @@ use nix_types::{NarFileName, NarInfo, NarInfoFileName, StoreHash};
 
 use crate::context::Cache;
 use crate::protocol::StoreDir;
-use crate::token::Token;
+use crate::token::SharedToken;
 
 #[derive(Default, Clone, Copy)]
 pub(crate) struct NoopCache {}
@@ -16,7 +16,7 @@ impl Cache for NoopCache {
 
     async fn missing_narinfos(
         &self,
-        _: &Token,
+        _: &SharedToken,
         store_hashes: &[StoreHash],
     ) -> Result<Vec<StoreHash>, Self::Error> {
         Ok(store_hashes.to_vec())
@@ -24,7 +24,7 @@ impl Cache for NoopCache {
 
     async fn upload_nar(
         &self,
-        _: &Token,
+        _: &SharedToken,
         _: NarFileName,
         _: NonZeroU64,
         nar_bytes: impl AsyncRead + Send + 'static,
@@ -35,7 +35,7 @@ impl Cache for NoopCache {
 
     async fn upload_narinfo(
         &self,
-        _: &Token,
+        _: &SharedToken,
         _: NarInfoFileName,
         narinfo: NarInfo<(), StoreDir>,
     ) -> Result<u64, Self::Error> {

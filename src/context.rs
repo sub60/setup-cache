@@ -3,7 +3,6 @@ use core::num::NonZeroU64;
 use core::time::Duration;
 
 use futures::{AsyncRead, AsyncWrite};
-use http::HeaderValue;
 use nix_types::{
     ContentAddress,
     NarFileName,
@@ -18,15 +17,15 @@ use nix_types::{
 
 use crate::event_loop;
 use crate::protocol::{self, StoreDir};
-use crate::token::Token;
+use crate::token::{SharedToken, Token};
 
 pub trait Context {
     type Cache: Cache;
-    type FetchTokenError: Error + Send;
     type HttpClient: HttpClient;
     type Nix: Nix;
     type Spawner: Spawner;
     type StopProgressReporter<W: AsyncWrite + Unpin>: StopProgressReporter;
+    type TokenFetcher: TokenFetcher;
 
     fn handle_rx_error(&mut self, rx_error: protocol::ReceiveError);
 
@@ -40,10 +39,6 @@ pub trait Context {
     fn nix(&self) -> &Self::Nix;
 
     fn spawner(&self) -> &Self::Spawner;
-
-    fn token_fetcher(
-        &self,
-    ) -> impl TokenFetcher<Error = Self::FetchTokenError> + use<Self>;
 }
 
 pub trait Cache: Clone + Send + Sync + 'static {
@@ -53,7 +48,7 @@ pub trait Cache: Clone + Send + Sync + 'static {
     /// same order as they appear in `store_hashes`.
     fn missing_narinfos(
         &self,
-        token: &Token,
+        token: &SharedToken,
         store_hashes: &[StoreHash],
     ) -> impl Future<Output = Result<Vec<StoreHash>, Self::Error>> + Send;
 
@@ -61,7 +56,7 @@ pub trait Cache: Clone + Send + Sync + 'static {
     /// zero if an equivalent NAR was already present.
     fn upload_nar(
         &self,
-        token: &Token,
+        token: &SharedToken,
         nar_file_name: NarFileName,
         nar_size: NonZeroU64,
         nar_bytes: impl AsyncRead + Send + 'static,
@@ -71,7 +66,7 @@ pub trait Cache: Clone + Send + Sync + 'static {
     /// Returns zero if an equivalent NARInfo was already present.
     fn upload_narinfo(
         &self,
-        token: &Token,
+        token: &SharedToken,
         narinfo_filename: NarInfoFileName,
         narinfo: NarInfo<(), StoreDir>,
     ) -> impl Future<Output = Result<u64, Self::Error>> + Send;
@@ -84,9 +79,7 @@ pub trait TokenFetcher: Send + Sync + 'static {
     /// with how long it's valid for, or `None` if it never expires.
     fn fetch(
         &self,
-    ) -> impl Future<
-        Output = Result<(HeaderValue, Option<Duration>), Self::Error>,
-    > + Send;
+    ) -> impl Future<Output = Result<(Token, Option<Duration>), Self::Error>> + Send;
 }
 
 pub trait HttpClient: Clone + Send + Sync + 'static {

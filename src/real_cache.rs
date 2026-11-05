@@ -24,7 +24,7 @@ use crate::async_read_ext::AsyncReadExt;
 use crate::context;
 use crate::protocol::StoreDir;
 use crate::run::RunArgs;
-use crate::token::Token;
+use crate::token::SharedToken;
 
 #[derive(Clone)]
 pub(crate) struct RealCache {
@@ -145,7 +145,7 @@ impl RealCache {
     /// `None` if the cache already contains it.
     async fn initiate_multipart_nar_upload(
         &self,
-        token: &Token,
+        token: &SharedToken,
         nar_file_name: &NarFileName,
         nar_size: NonZeroU64,
     ) -> Result<Option<nar_multiparts::ResponseBody>, CacheRequestError> {
@@ -196,7 +196,7 @@ impl RealCache {
 
     async fn complete_multipart_nar_upload(
         &self,
-        token: &Token,
+        token: &SharedToken,
         nar_file_name: NarFileName,
         upload_id: &nar_multiparts::UploadId,
         etags: SmallVec<[Etag; 8]>,
@@ -280,7 +280,7 @@ impl RealCache {
 
     async fn request_part_urls(
         &self,
-        token: &Token,
+        token: &SharedToken,
         upload_id: &nar_multiparts::UploadId,
         part_numbers: SmallVec<[NonZeroU16; 8]>,
         nar_file_name: NarFileName,
@@ -372,7 +372,7 @@ impl RealCache {
 
     async fn upload_nar_multiparts(
         &self,
-        token: &Token,
+        token: &SharedToken,
         nar_file_name: &NarFileName,
         nar_size: NonZeroU64,
         initiate_body: &nar_multiparts::ResponseBody,
@@ -500,7 +500,7 @@ impl context::Cache for RealCache {
 
     async fn missing_narinfos(
         &self,
-        token: &Token,
+        token: &SharedToken,
         store_hashes: &[StoreHash],
     ) -> Result<Vec<StoreHash>, Self::Error> {
         let url = self.missing_narinfos_url();
@@ -547,7 +547,7 @@ impl context::Cache for RealCache {
 
     async fn upload_nar(
         &self,
-        token: &Token,
+        token: &SharedToken,
         nar_file_name: NarFileName,
         nar_size: NonZeroU64,
         nar_bytes: impl AsyncRead + Send + 'static,
@@ -583,7 +583,7 @@ impl context::Cache for RealCache {
 
     async fn upload_narinfo(
         &self,
-        token: &Token,
+        token: &SharedToken,
         narinfo_filename: NarInfoFileName,
         narinfo: NarInfo<(), StoreDir>,
     ) -> Result<u64, Self::Error> {

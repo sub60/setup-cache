@@ -8,7 +8,7 @@ use crate::noop_cache::NoopCache;
 use crate::protocol::StoreDir;
 use crate::real_cache::{RealCache, RealCacheConnectError};
 use crate::run::RunArgs;
-use crate::token::Token;
+use crate::token::SharedToken;
 
 #[derive(Clone)]
 pub(crate) enum AnyCache {
@@ -48,7 +48,7 @@ impl Cache for AnyCache {
 
     async fn missing_narinfos(
         &self,
-        token: &Token,
+        token: &SharedToken,
         store_hashes: &[StoreHash],
     ) -> Result<Vec<StoreHash>, Self::Error> {
         match self {
@@ -65,7 +65,7 @@ impl Cache for AnyCache {
 
     async fn upload_nar(
         &self,
-        token: &Token,
+        token: &SharedToken,
         nar_file_name: NarFileName,
         nar_size: NonZeroU64,
         nar_bytes: impl AsyncRead + Send + 'static,
@@ -84,7 +84,7 @@ impl Cache for AnyCache {
 
     async fn upload_narinfo(
         &self,
-        token: &Token,
+        token: &SharedToken,
         narinfo_filename: NarInfoFileName,
         narinfo: NarInfo<(), StoreDir>,
     ) -> Result<u64, Self::Error> {

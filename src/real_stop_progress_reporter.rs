@@ -1,6 +1,6 @@
 use core::error::Error;
-use core::fmt;
 use core::num::NonZeroU64;
+use core::{fmt, iter};
 
 use futures::{AsyncWrite, AsyncWriteExt};
 use nix_types::StorePath;
@@ -24,11 +24,12 @@ struct FinalReport<'a, Ctx: context::Context>(
 struct Count<'a>(u32, &'a str);
 
 /// An error followed by its causes.
-enum WithCauses<'a> {
-    /// Joined with colons on a single line, as annotations need.
+pub(crate) enum WithCauses<'a> {
+    /// Joined with colons on a single line.
     Inline(&'a dyn Error),
 
-    /// Each on its own indented line.
+    /// Each on its own line under an indented `Caused by:` header, numbered
+    /// when there's more than one.
     Indented(&'a dyn Error),
 }
 
@@ -112,17 +113,15 @@ impl<Ctx: context::Context> fmt::Display for FinalReport<'_, Ctx> {
             + report.path_handling_errors.len())
             as u32;
 
-        let num_paths_not_pushed = num_paths_failed
-            + num_paths_not_looked_up
-            + report.num_paths_without_token;
+        let num_paths_not_pushed = num_paths_failed + num_paths_not_looked_up;
 
         // Annotations are shown at the top of the workflow run, and here they
         // head the details below, since the job itself doesn't fail.
 
-        if let Some(error) = &report.token_error {
+        if let Some(error) = &report.token_refresh_error {
             writeln!(
                 f,
-                "::warning::Couldn't get a token to push store paths with: {}",
+                "::warning::Couldn't refresh the token: {}",
                 WithCauses::Inline(error),
             )?;
         }
@@ -136,11 +135,13 @@ impl<Ctx: context::Context> fmt::Display for FinalReport<'_, Ctx> {
             )?;
         }
 
-        writeln!(
-            f,
-            "Skipped {}",
-            Count(report.num_paths_skipped, "store path")
-        )?;
+        if report.num_paths_skipped > 0 {
+            writeln!(
+                f,
+                "Skipped {}",
+                Count(report.num_paths_skipped, "store path")
+            )?;
+        }
 
         write!(f, "Pushed {}", Count(report.num_paths_pushed, "store path"))?;
         if report.num_paths_pushed > 0 {
@@ -151,14 +152,6 @@ impl<Ctx: context::Context> fmt::Display for FinalReport<'_, Ctx> {
             )?;
         }
         writeln!(f)?;
-
-        if report.num_paths_without_token > 0 {
-            writeln!(
-                f,
-                "Failed to get a token to push {} with",
-                Count(report.num_paths_without_token, "store path"),
-            )?;
-        }
 
         for (num_paths, error) in &report.narinfo_lookup_errors {
             writeln!(
@@ -201,16 +194,27 @@ impl fmt::Display for WithCauses<'_> {
 
         write!(f, "{error}")?;
 
-        let mut source = error.source();
-        while let Some(cause) = source {
-            match self {
-                Self::Inline(_) => write!(f, ": {cause}")?,
-                Self::Indented(_) => write!(f, "\n  caused by: {cause}")?,
-            }
-            source = cause.source();
-        }
+        let mut causes =
+            iter::successors(error.source(), |&cause| cause.source());
 
-        Ok(())
+        match self {
+            Self::Inline(_) => {
+                causes.try_for_each(|cause| write!(f, ": {cause}"))
+            },
+            Self::Indented(_) => {
+                let num_causes = causes.clone().count();
+                if num_causes > 0 {
+                    write!(f, "\n  Caused by:")?;
+                }
+                causes.enumerate().try_for_each(|(idx, cause)| {
+                    if num_causes == 1 {
+                        write!(f, "\n    {cause}")
+                    } else {
+                        write!(f, "\n    {idx}: {cause}")
+                    }
+                })
+            },
+        }
     }
 }
 

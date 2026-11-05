@@ -3,13 +3,13 @@
 use core::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use reqwest::StatusCode;
-use reqwest::header::{self, HeaderValue};
+use reqwest::{StatusCode, header};
 use sub60_cache_api::Endpoint as _;
 use sub60_cache_api::endpoints::auth_github_actions;
 
 use crate::context;
 use crate::real_cache::ResponseBodySuffix;
+use crate::token::{InvalidTokenError, Token};
 
 /// How long to wait before each retry of an exchange that failed for a reason
 /// that might be transient.
@@ -19,7 +19,7 @@ const EXCHANGE_RETRY_DELAYS: [Duration; 3] =
 #[derive(Clone)]
 pub(crate) enum RealTokenFetcher {
     /// A token given by the user.
-    Token(HeaderValue),
+    Token(Token),
 
     /// The tokens the cache gives in exchange for the OIDC tokens of the
     /// GitHub Actions job the daemon runs in.
@@ -31,7 +31,7 @@ pub(crate) struct RealTokenFetcherArgs {
     /// The token to push store paths with. If unset, the GitHub Actions job's
     /// OIDC tokens are exchanged for the cache's tokens.
     #[arg(long, env = "SUB60_CACHE_TOKEN", hide_env_values = true)]
-    token: Option<String>,
+    token: Option<Token>,
     #[arg(long, env = "ACTIONS_ID_TOKEN_REQUEST_URL")]
     oidc_token_request_url: Option<url::Url>,
     #[arg(
@@ -60,8 +60,6 @@ pub(crate) struct GitHubActions {
 pub(crate) enum NewRealTokenFetcherError {
     #[display("couldn't build HTTP client")]
     BuildHttpClient(#[source] reqwest::Error),
-    #[display("the token isn't a valid header value")]
-    InvalidToken(#[source] header::InvalidHeaderValue),
     #[display(
         "no token to push store paths with: set the `token` input, or give \
          the job the `id-token: write` permission"
@@ -91,8 +89,8 @@ pub(crate) enum FetchTokenError {
         "couldn't parse the token the job's OIDC token was exchanged for"
     )]
     ParseExchange(#[source] serde_json::Error),
-    #[display("the token isn't a valid header value")]
-    InvalidToken(#[source] header::InvalidHeaderValue),
+    #[display("the cache gave an invalid token")]
+    InvalidToken(#[source] InvalidTokenError),
 }
 
 /// The body of a successful response to a request for a job's OIDC token.
@@ -108,9 +106,7 @@ impl RealTokenFetcher {
     ) -> Result<Self, NewRealTokenFetcherError> {
         match args {
             RealTokenFetcherArgs { token: Some(token), .. } => {
-                authorization(token)
-                    .map(Self::Token)
-                    .map_err(NewRealTokenFetcherError::InvalidToken)
+                Ok(Self::Token(token.clone()))
             },
             RealTokenFetcherArgs {
                 oidc_token_request_url: Some(url),
@@ -132,23 +128,19 @@ impl RealTokenFetcher {
 impl context::TokenFetcher for RealTokenFetcher {
     type Error = FetchTokenError;
 
-    async fn fetch(
-        &self,
-    ) -> Result<(HeaderValue, Option<Duration>), Self::Error> {
+    async fn fetch(&self) -> Result<(Token, Option<Duration>), Self::Error> {
         match self {
-            Self::Token(authorization) => Ok((authorization.clone(), None)),
+            Self::Token(token) => Ok((token.clone(), None)),
             Self::GitHubActions(github_actions) => github_actions
                 .fetch()
                 .await
-                .map(|(authorization, expires_in)| {
-                    (authorization, Some(expires_in))
-                }),
+                .map(|(token, expires_in)| (token, Some(expires_in))),
         }
     }
 }
 
 impl GitHubActions {
-    async fn fetch(&self) -> Result<(HeaderValue, Duration), FetchTokenError> {
+    async fn fetch(&self) -> Result<(Token, Duration), FetchTokenError> {
         let mut retry_delays = EXCHANGE_RETRY_DELAYS.into_iter();
 
         let response = loop {
@@ -162,10 +154,10 @@ impl GitHubActions {
             }
         };
 
-        let authorization = authorization(&response.token)
-            .map_err(FetchTokenError::InvalidToken)?;
+        let token =
+            response.token.parse().map_err(FetchTokenError::InvalidToken)?;
 
-        Ok((authorization, response.expires_at.saturating_sub(unix_ts())))
+        Ok((token, response.expires_at.saturating_sub(unix_ts())))
     }
 
     /// Requests the job's OIDC token, and exchanges it for one of the cache's.
@@ -243,15 +235,6 @@ impl FetchTokenError {
             | Self::InvalidToken(_) => false,
         }
     }
-}
-
-/// Returns the `Authorization` header authenticating requests with the token.
-fn authorization(
-    token: &str,
-) -> Result<HeaderValue, header::InvalidHeaderValue> {
-    let mut authorization = HeaderValue::try_from(format!("Bearer {token}"))?;
-    authorization.set_sensitive(true);
-    Ok(authorization)
 }
 
 fn unix_ts() -> Duration {
