@@ -31,14 +31,10 @@ pub(crate) enum AnyCacheError {
 }
 
 impl AnyCache {
-    pub(crate) async fn new(
-        args: &RunArgs,
-    ) -> Result<Self, RealCacheConnectError> {
+    pub(crate) fn new(args: &RunArgs) -> Result<Self, RealCacheConnectError> {
         match args.cache_kind {
             AnyCacheKind::Noop => Ok(NoopCache::default().into()),
-            AnyCacheKind::Real => {
-                RealCache::connect(args).await.map(Into::into)
-            },
+            AnyCacheKind::Real => RealCache::new(args).map(Into::into),
         }
     }
 }

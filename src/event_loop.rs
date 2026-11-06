@@ -29,6 +29,7 @@ use nix_types::{
 };
 use pin_project_lite::pin_project;
 use sha2::{Digest, Sha256};
+use smallvec::SmallVec;
 
 use crate::context::{
     Cache,
@@ -123,6 +124,7 @@ pub(crate) enum HandlePathError<C: Cache, N: Nix> {
 enum Event<Writer> {
     PushStorePath(StorePath<StoreDir>),
     Stop(Writer),
+    Substituters(String),
 }
 
 pin_project! {
@@ -167,6 +169,9 @@ pub(crate) async fn run<Ctx: Context>(
     let mut handle_store_paths = FuturesUnordered::new();
     let mut pending_handle_store_paths = VecDeque::new();
     let mut seen_store_hashes = HashSet::new();
+    let mut upstream_caches = args.upstream_caches.clone().unwrap_or_default();
+    let mut last_substituters = String::new();
+    let cache_url = args.cache_url();
 
     let mut report = ActionReport::<Ctx>::default();
     let mut stop_progress_writer = None;
@@ -175,8 +180,9 @@ pub(crate) async fn run<Ctx: Context>(
     let nix = ctx.nix().clone();
 
     let handle_store_path_fut =
-        |path: StorePath<StoreDir>, token: SharedToken| {
-            let mut upstream_caches = args.upstream_caches.clone();
+        |path: StorePath<StoreDir>,
+         token: SharedToken,
+         upstream_caches: SmallVec<[url::Url; 2]>| {
             let cache = cache.clone();
             let http_client = http_client.clone();
             let mut nix = nix.clone();
@@ -184,7 +190,7 @@ pub(crate) async fn run<Ctx: Context>(
                 let result = handle_store_path(
                     &path,
                     &token,
-                    &mut upstream_caches,
+                    upstream_caches,
                     &cache,
                     &http_client,
                     &mut nix,
@@ -232,6 +238,28 @@ pub(crate) async fn run<Ctx: Context>(
                     },
                     Ok(Event::Stop(writer)) => {
                         stop_progress_writer = Some(writer);
+                    },
+                    Ok(Event::Substituters(substituters)) => {
+                        if substituters == last_substituters
+                            || args.upstream_caches.is_some() {
+                                continue;
+                        }
+
+                        upstream_caches = substituters
+                            .split_whitespace()
+                            .filter_map(|url| url.parse::<url::Url>().ok())
+                            .filter(|url| matches!(url.scheme(), "http" | "https"))
+                            .map(|mut url| {
+                                url.set_query(None);
+                                if let Ok(mut segments) = url.path_segments_mut() {
+                                    segments.pop_if_empty();
+                                }
+                                url
+                            })
+                            .filter(|url| url != &cache_url)
+                            .collect();
+
+                        last_substituters = substituters;
                     },
                     Err(rx_err) => ctx.handle_rx_error(rx_err),
                 }
@@ -286,7 +314,11 @@ pub(crate) async fn run<Ctx: Context>(
                         continue;
                     }
 
-                    let fut = handle_store_path_fut(path, token.clone());
+                    let fut = handle_store_path_fut(
+                        path,
+                        token.clone(),
+                        upstream_caches.clone(),
+                    );
 
                     if handle_store_paths.len() < MAX_CONCURRENT_STORE_PATHS {
                         handle_store_paths.push(ctx.spawner().spawn(fut));
@@ -365,6 +397,9 @@ async fn handle_io<I: Io>(
                 let _ = message_tx.send(Ok(Event::Stop(writer)));
                 return;
             },
+            Ok(protocol::Message::Substituters(substituters)) => {
+                let _ = message_tx.send(Ok(Event::Substituters(substituters)));
+            },
             Err(err) => {
                 let _ = message_tx.send(Err(err));
             },
@@ -396,7 +431,7 @@ async fn refresh_token<F: TokenFetcher>(
 async fn handle_store_path<C: Cache, H: HttpClient, N: Nix>(
     store_path: &StorePath<StoreDir>,
     token: &SharedToken,
-    upstream_caches: &mut [url::Url],
+    upstream_caches: impl IntoIterator<Item = url::Url>,
     cache: &C,
     http_client: &H,
     nix: &mut N,
@@ -553,21 +588,19 @@ async fn sha256(
 
 async fn upstream_caches_have_narinfo<H: HttpClient>(
     narinfo_filename: &NarInfoFileName,
-    upstream_caches: &mut [url::Url],
+    upstream_caches: impl IntoIterator<Item = url::Url>,
     http_client: &H,
 ) -> bool {
     let narinfo_path_segment = narinfo_filename.to_string();
 
-    for upstream_cache in upstream_caches.iter_mut() {
+    let mut requests = FuturesUnordered::new();
+
+    for mut upstream_cache in upstream_caches {
         upstream_cache
             .path_segments_mut()
             .expect("upstream cache URL can be a base")
             .push(&narinfo_path_segment);
-    }
 
-    let mut requests = FuturesUnordered::new();
-
-    for upstream_cache in upstream_caches.iter().cloned() {
         requests.push(async {
             matches!(
                 http_client.get(upstream_cache).await,

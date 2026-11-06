@@ -35,9 +35,9 @@ pub(crate) struct RealCache {
 #[derive(Debug, clap::Args)]
 pub(crate) struct RealCacheRunArgs {
     #[arg(long)]
-    namespace: NamespaceName,
+    pub(crate) namespace: NamespaceName,
     #[arg(long)]
-    cache: CacheName,
+    pub(crate) cache: CacheName,
 }
 
 #[derive(Debug, derive_more::Display, cauchy::Error)]
@@ -132,23 +132,14 @@ impl fmt::Display for ResponseBodySuffix<'_> {
 
 impl RealCache {
     /// TODO: docs.
-    pub(crate) async fn connect(
-        RunArgs { cache_args: args, origin, .. }: &RunArgs,
-    ) -> Result<Self, RealCacheConnectError> {
-        let mut cache_url = origin.clone();
-        cache_url
-            .path_segments_mut()
-            .expect("cache URL can be a base")
-            .push(&args.namespace)
-            .push(&args.cache);
-
+    pub(crate) fn new(args: &RunArgs) -> Result<Self, RealCacheConnectError> {
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .read_timeout(Duration::from_mins(2))
             .build()
             .map_err(RealCacheConnectError::BuildHttpClient)?;
 
-        Ok(Self { cache_url, client })
+        Ok(Self { cache_url: args.cache_url(), client })
     }
 
     /// Initiates a multipart upload for a NAR of the given size, returning

@@ -19,9 +19,8 @@ inputs:
     description: "The token used to push store paths. If unset, the job's GitHub Actions OIDC token is exchanged for one, which needs the job to have the `id-token: write` permission"
     required: false
   upstream-caches:
-    description: "Space/newline-separated binary cache URLs whose store paths should not be pushed. Use 'none' to disable"
+    description: "Space/newline-separated binary cache URLs whose store paths should not be pushed. If unset, they're the HTTP(S) substituters Nix builds with, including those from a flake's nixConfig (except the cache itself, of course). Use 'none' to push every store path"
     required: false
-    default: "https://cache.nixos.org"
   github-token:
     description: "GitHub token used to download release artifacts from private repos"
     required: false

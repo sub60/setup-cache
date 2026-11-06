@@ -375,11 +375,17 @@ const waitForDaemonReady = async (child) => {
 };
 
 /**
+ * Parses the `upstream-caches` input, returning `undefined` if it's unset and
+ * an empty list if it's `none`.
+ *
  * @param {string} input
- * @returns {string[]}
+ * @returns {string[] | undefined}
  */
 const parseUpstreamCaches = (input) => {
   const values = input.split(/\s+/).filter(Boolean);
+  if (values.length === 0) {
+    return undefined;
+  }
   return values.length === 1 && values[0].toLowerCase() === "none"
     ? []
     : values;
@@ -481,8 +487,8 @@ const main = async () => {
       cache,
     ];
 
-    if (upstreamCaches.length > 0) {
-      daemonArgs.push("--upstream-caches", upstreamCaches.join(","));
+    if (upstreamCaches !== undefined) {
+      daemonArgs.push(`--upstream-caches=${upstreamCaches.join(",")}`);
     }
 
     let child;

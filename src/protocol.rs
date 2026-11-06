@@ -2,10 +2,11 @@
 //! the `push`/`stop` subcommands.
 //!
 //! Store paths are separated by newlines, and a null byte signals the daemon to
-//! stop and shut down.
+//! stop and shut down. A line starting with a `0x01` byte holds a
+//! whitespace-separated list of substituters.
 //!
 //! ```text
-//! push:  /nix/store/abc-foo\n/nix/store/def-bar\n
+//! push: \x01https://cache.nixos.org/\n/nix/store/abc-foo\n/nix/store/def-bar\n
 //! stop: \0
 //! ```
 
@@ -19,12 +20,18 @@ use futures::{AsyncRead, AsyncWrite};
 use nix_types::{NixStoreLiteral, StorePath};
 use smol_str::SmolStr;
 
-/// The store paths separator in the wire format.
-const PATH_SEPARATOR: u8 = b'\n';
+/// The lines separator in the wire format.
+const LINE_SEPARATOR: u8 = b'\n';
+
+/// The maximum length of a line, separator excluded.
+const MAX_LINE_LEN: usize = 64 * 1024;
 
 /// The sentinal byte which signals the daemon to stop pending uploads and shut
 /// down.
 const STOP_SENTINEL: u8 = b'\0';
+
+/// The byte starting a line of substituters.
+const SUBSTITUTERS_PREFIX: u8 = 0x01;
 
 pin_project_lite::pin_project! {
     pub(crate) struct Sender<Writer> {
@@ -40,8 +47,8 @@ pin_project_lite::pin_project! {
 pin_project_lite::pin_project! {
     pub(crate) struct Receiver<Reader> {
         is_done: bool,
-        // The buffer bytes are read into.
-        buf: Box<[u8; 1024]>,
+        // The buffer bytes are read into, which grows to fit the longest line.
+        buf: Vec<u8>,
         // The range of bytes in [`buf`](Receiver::buf) we still have to handle.
         unhandled_range: Range<usize>,
         #[pin]
@@ -53,6 +60,8 @@ pin_project_lite::pin_project! {
 pub(crate) enum Message {
     PushStorePath(StorePath<StoreDir>),
     StopDaemon,
+    /// A whitespace-separated list of substituters, without newlines.
+    Substituters(String),
 }
 
 #[derive(Clone)]
@@ -67,6 +76,7 @@ pub enum StoreDir {
 pub(crate) enum ReceiveError {
     Io(io::Error),
     InvalidStorePath(<StorePath<StoreDir> as str::FromStr>::Err),
+    LineTooLong,
 }
 
 impl<Writer> Sender<Writer> {
@@ -132,10 +142,15 @@ impl<Writer: AsyncWrite> futures::Sink<Message> for Sender<Writer> {
             Message::PushStorePath(store_path) => {
                 write!(buf, "{store_path}")
                     .expect("writing to a Vec never fails");
-                buf.push(PATH_SEPARATOR);
+                buf.push(LINE_SEPARATOR);
             },
             Message::StopDaemon => {
                 buf.push(STOP_SENTINEL);
+            },
+            Message::Substituters(substituters) => {
+                buf.push(SUBSTITUTERS_PREFIX);
+                buf.extend_from_slice(substituters.as_bytes());
+                buf.push(LINE_SEPARATOR);
             },
         }
 
@@ -164,7 +179,7 @@ impl<Reader> Receiver<Reader> {
         Self {
             is_done: false,
             reader,
-            buf: Box::new([0u8; _]),
+            buf: vec![0; 1024],
             unhandled_range: 0..0,
         }
     }
@@ -190,11 +205,17 @@ impl<Reader: AsyncRead> futures::Stream for Receiver<Reader> {
                 break Ok(Message::StopDaemon);
             }
 
-            let Some(separator_offset) = memchr::memchr(PATH_SEPARATOR, bytes)
+            let Some(separator_offset) = memchr::memchr(LINE_SEPARATOR, bytes)
             else {
                 let bytes_len = bytes.len();
+                if bytes_len > MAX_LINE_LEN {
+                    break Err(ReceiveError::LineTooLong);
+                }
                 this.buf.copy_within(this.unhandled_range.clone(), 0);
                 *this.unhandled_range = 0..bytes_len;
+                if bytes_len == this.buf.len() {
+                    this.buf.resize(bytes_len * 2, 0);
+                }
                 let read_buf = &mut this.buf[this.unhandled_range.end..];
                 match ready!(this.reader.as_mut().poll_read(ctx, read_buf)) {
                     Ok(0) => return Poll::Ready(None),
@@ -204,11 +225,11 @@ impl<Reader: AsyncRead> futures::Stream for Receiver<Reader> {
                 continue;
             };
 
-            let store_path_bytes = &bytes[..separator_offset];
+            let line = &bytes[..separator_offset];
 
             this.unhandled_range.start += separator_offset + 1;
 
-            let store_path_str = match str::from_utf8(store_path_bytes) {
+            let line = match str::from_utf8(line) {
                 Ok(s) => s,
                 Err(err) => {
                     break Err(ReceiveError::Io(io::Error::new(
@@ -218,7 +239,13 @@ impl<Reader: AsyncRead> futures::Stream for Receiver<Reader> {
                 },
             };
 
-            break match store_path_str.parse() {
+            if let Some(substituters) =
+                line.strip_prefix(char::from(SUBSTITUTERS_PREFIX))
+            {
+                break Ok(Message::Substituters(substituters.to_owned()));
+            }
+
+            break match line.parse() {
                 Ok(store_path) => Ok(Message::PushStorePath(store_path)),
                 Err(err) => Err(ReceiveError::InvalidStorePath(err)),
             };
@@ -259,6 +286,9 @@ impl fmt::Display for ReceiveError {
             Self::Io(error) => write!(f, "I/O error: {error}"),
             Self::InvalidStorePath(error) => {
                 write!(f, "invalid store path: {error}")
+            },
+            Self::LineTooLong => {
+                write!(f, "line longer than {MAX_LINE_LEN} bytes")
             },
         }
     }
@@ -351,6 +381,72 @@ mod tests {
         assert_eq!(msgs.len(), 2);
         assert!(matches!(msgs[0], Ok(Message::PushStorePath(_))));
         assert!(matches!(msgs[1], Ok(Message::StopDaemon)));
+    }
+
+    #[test]
+    fn send_substituters_then_path() {
+        let bytes = send_messages(vec![
+            Message::Substituters(
+                "https://a.example/ https://b.example".into(),
+            ),
+            Message::PushStorePath(path(
+                "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-foo",
+            )),
+        ]);
+
+        assert_eq!(
+            bytes,
+            b"\x01https://a.example/ https://b.example\n\
+              /nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-foo\n",
+        );
+    }
+
+    #[test]
+    fn receive_substituters_then_path() {
+        let msgs = parse_messages(
+            b"\x01https://a.example/ https://b.example\n\
+              /nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-foo\n",
+        );
+        assert_eq!(msgs.len(), 2);
+        match &msgs[0] {
+            Ok(Message::Substituters(substituters)) => {
+                assert_eq!(substituters, "https://a.example/ https://b.example")
+            },
+            other => panic!("unexpected: {other:?}"),
+        }
+        assert!(matches!(&msgs[1], Ok(Message::PushStorePath(_))));
+    }
+
+    #[test]
+    fn receive_empty_substituters() {
+        let msgs = parse_messages(b"\x01\n");
+        assert_eq!(msgs.len(), 1);
+        assert!(
+            matches!(&msgs[0], Ok(Message::Substituters(s)) if s.is_empty())
+        );
+    }
+
+    #[test]
+    fn receive_line_longer_than_initial_buffer() {
+        let substituters = "https://a.example/ ".repeat(200);
+        let mut input = vec![SUBSTITUTERS_PREFIX];
+        input.extend_from_slice(substituters.as_bytes());
+        input.extend_from_slice(
+            b"\n/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-foo\n",
+        );
+        let msgs = parse_messages(&input);
+        assert_eq!(msgs.len(), 2);
+        assert!(
+            matches!(&msgs[0], Ok(Message::Substituters(s)) if *s == substituters)
+        );
+        assert!(matches!(&msgs[1], Ok(Message::PushStorePath(_))));
+    }
+
+    #[test]
+    fn receive_line_too_long() {
+        let msgs = parse_messages(&vec![b'a'; MAX_LINE_LEN + 2]);
+        assert_eq!(msgs.len(), 1);
+        assert!(matches!(msgs[0], Err(ReceiveError::LineTooLong)));
     }
 
     #[test]

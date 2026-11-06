@@ -46,13 +46,9 @@ pub struct RunArgs {
     #[arg(long)]
     pub(crate) netrc_file: PathBuf,
 
-    #[arg(
-        long,
-        required = false,
-        default_value = "",
-        value_parser = parse_upstream_caches,
-    )]
-    pub(crate) upstream_caches: SmallVec<[url::Url; 2]>,
+    /// The comma-separated URLs of the upstream binary caches.
+    #[arg(long, value_parser = parse_upstream_caches)]
+    pub(crate) upstream_caches: Option<SmallVec<[url::Url; 2]>>,
 
     /// The origin of the cache's server, e.g. `https://cache.sub60.dev`.
     #[arg(long, value_parser = parse_origin)]
@@ -151,12 +147,10 @@ async fn start(
 
     #[cfg(not(feature = "sub60-cache"))]
     let cache = crate::any_cache::AnyCache::new(&args)
-        .await
         .map_err(StartError::ConnectToCache)?;
 
     #[cfg(feature = "sub60-cache")]
-    let cache =
-        RealCache::connect(&args).await.map_err(StartError::ConnectToCache)?;
+    let cache = RealCache::new(&args).map_err(StartError::ConnectToCache)?;
 
     let token_fetcher =
         RealTokenFetcher::new(&args.token_fetcher_args, args.origin.clone())
@@ -201,6 +195,19 @@ fn parse_origin(value: &str) -> Result<url::Url, String> {
     }
 
     Ok(url)
+}
+
+impl RunArgs {
+    /// Returns the URL of the cache.
+    pub(crate) fn cache_url(&self) -> url::Url {
+        let mut cache_url = self.origin.clone();
+        cache_url
+            .path_segments_mut()
+            .expect("cache URL can be a base")
+            .push(&self.cache_args.namespace)
+            .push(&self.cache_args.cache);
+        cache_url
+    }
 }
 
 impl Stream for UnixStreams {

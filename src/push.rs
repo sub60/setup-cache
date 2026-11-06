@@ -3,7 +3,7 @@
 use core::fmt;
 use core::pin::pin;
 use std::path::PathBuf;
-use std::{io, process};
+use std::{env, io, process};
 
 use futures::SinkExt;
 use nix_types::StorePath;
@@ -34,6 +34,21 @@ pub(crate) fn push(args: PushArgs) {
 
             let mut sender =
                 pin!(protocol::Sender::new(async_compat::Compat::new(socket)));
+
+            // Nix passes its settings to the post-build hook in $NIX_CONFIG
+            // since 2.4. With older versions the daemon gets no substituters.
+            if let Some(substituters) =
+                env::var("NIX_CONFIG").ok().as_deref().and_then(|config| {
+                    config
+                        .lines()
+                        .find_map(|line| line.strip_prefix("substituters = "))
+                })
+            {
+                sender
+                    .feed(protocol::Message::Substituters(substituters.into()))
+                    .await
+                    .map_err(PushError::WriteMessage)?;
+            }
 
             for store_path in args.store_paths {
                 sender
