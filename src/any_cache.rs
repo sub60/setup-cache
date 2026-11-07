@@ -2,6 +2,7 @@ use core::num::NonZeroU64;
 
 use futures::AsyncRead;
 use nix_types::{NarFileName, NarInfo, NarInfoFileName, StoreHash};
+use sub60_cache_api::endpoints::nar_multiparts_complete;
 
 use crate::context::Cache;
 use crate::noop_cache::NoopCache;
@@ -65,17 +66,16 @@ impl Cache for AnyCache {
     async fn upload_nar_multipart(
         &self,
         token: &SharedToken,
-        nar_file_name: NarFileName,
         nar_size: NonZeroU64,
         nar_bytes: impl AsyncRead + Send + 'static,
-    ) -> Result<u64, Self::Error> {
+    ) -> Result<nar_multiparts_complete::Response, Self::Error> {
         match self {
             Self::Noop(cache) => cache
-                .upload_nar_multipart(token, nar_file_name, nar_size, nar_bytes)
+                .upload_nar_multipart(token, nar_size, nar_bytes)
                 .await
                 .map_err(Into::into),
             Self::Real(cache) => cache
-                .upload_nar_multipart(token, nar_file_name, nar_size, nar_bytes)
+                .upload_nar_multipart(token, nar_size, nar_bytes)
                 .await
                 .map_err(Into::into),
         }

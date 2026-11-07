@@ -1,8 +1,17 @@
 use core::convert::Infallible;
 use core::num::NonZeroU64;
+use core::pin::pin;
 
-use futures::AsyncRead;
-use nix_types::{NarFileName, NarInfo, NarInfoFileName, StoreHash};
+use futures::{AsyncRead, AsyncReadExt};
+use nix_types::{
+    NarFileName,
+    NarInfo,
+    NarInfoFileName,
+    Nix32Digest,
+    StoreHash,
+};
+use sha2::{Digest, Sha256};
+use sub60_cache_api::endpoints::nar_multiparts_complete;
 
 use crate::context::Cache;
 use crate::protocol::StoreDir;
@@ -30,12 +39,25 @@ impl Cache for NoopCache {
     async fn upload_nar_multipart(
         &self,
         _: &SharedToken,
-        _: NarFileName,
         _: NonZeroU64,
         nar_bytes: impl AsyncRead + Send + 'static,
-    ) -> Result<u64, Self::Error> {
-        let mut sink = futures::io::sink();
-        Ok(futures::io::copy(nar_bytes, &mut sink).await.expect("never fails"))
+    ) -> Result<nar_multiparts_complete::Response, Self::Error> {
+        let mut nar_bytes = pin!(nar_bytes);
+        let mut sha256 = Sha256::new();
+        let mut buf = vec![0; 64 * 1024];
+
+        loop {
+            match nar_bytes.read(&mut buf).await.expect("never fails") {
+                0 => break,
+                num_read => sha256.update(&buf[..num_read]),
+            }
+        }
+
+        Ok(nar_multiparts_complete::Response::Created(
+            nar_multiparts_complete::ResponseBody {
+                file_hash: Nix32Digest::new(&sha256.finalize().into()),
+            },
+        ))
     }
 
     async fn upload_nar_single_part(

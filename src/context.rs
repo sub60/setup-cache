@@ -14,6 +14,7 @@ use nix_types::{
     StoreHash,
     StorePath,
 };
+use sub60_cache_api::endpoints::nar_multiparts_complete;
 
 use crate::event_loop;
 use crate::protocol::{self, StoreDir};
@@ -57,16 +58,15 @@ pub trait Cache: Clone + Send + Sync + 'static {
         store_hashes: &[StoreHash],
     ) -> impl Future<Output = Result<Vec<StoreHash>, Self::Error>> + Send;
 
-    /// Uploads a NAR of the given size in multiple parts, and returns the
-    /// number of bytes added to the cache. Returns zero if an equivalent NAR
-    /// was already present.
+    /// Uploads a NAR of the given size in multiple parts.
     fn upload_nar_multipart(
         &self,
         token: &SharedToken,
-        nar_file_name: NarFileName,
         nar_size: NonZeroU64,
         nar_bytes: impl AsyncRead + Send + 'static,
-    ) -> impl Future<Output = Result<u64, Self::Error>> + Send;
+    ) -> impl Future<
+        Output = Result<nar_multiparts_complete::Response, Self::Error>,
+    > + Send;
 
     /// Uploads a NAR in a single request, and returns the number of bytes
     /// added to the cache. Returns zero if an equivalent NAR was already

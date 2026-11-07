@@ -30,6 +30,7 @@ use nix_types::{
 use pin_project_lite::pin_project;
 use sha2::{Digest, Sha256};
 use smallvec::SmallVec;
+use sub60_cache_api::endpoints::nar_multiparts_complete;
 
 use crate::context::{
     Cache,
@@ -487,6 +488,8 @@ async fn handle_store_path<C: Cache, H: HttpClient, N: Nix>(
 
     let mut nar_buf = writer.inner;
 
+    // Compression left the buffer's position at its end, so rewind it back so
+    // the upload can read it from the start.
     nar_buf
         .seek(io::SeekFrom::Start(0))
         .await
@@ -520,28 +523,17 @@ async fn handle_store_path<C: Cache, H: HttpClient, N: Nix>(
 
         (file_hash, nar_size_pushed)
     } else {
-        // Multipart uploads are started with the NAR's file name, so the NAR
-        // is read once to hash it, and again to upload it.
-        let file_hash = sha256(&mut nar_buf)
-            .await
-            .map_err(HandlePathError::ReadNarBuffer)?;
-
-        nar_buf
-            .seek(io::SeekFrom::Start(0))
-            .await
-            .map_err(HandlePathError::RewindNarBuffer)?;
-
-        let nar_size_pushed = cache
-            .upload_nar_multipart(
-                token,
-                NarFileName { file_hash, extension },
-                file_size,
-                nar_buf,
-            )
+        let response = cache
+            .upload_nar_multipart(token, file_size, nar_buf)
             .await
             .map_err(HandlePathError::UploadNar)?;
 
-        (file_hash, nar_size_pushed)
+        let nar_size_pushed = match response {
+            nar_multiparts_complete::Response::Created(_) => file_size.get(),
+            nar_multiparts_complete::Response::AlreadyExists(_) => 0,
+        };
+
+        (response.body().file_hash, nar_size_pushed)
     };
 
     let narinfo = || -> Result<_, N::PathInfosError> {
@@ -567,23 +559,6 @@ async fn handle_store_path<C: Cache, H: HttpClient, N: Nix>(
         .map_err(HandlePathError::UploadNarInfo)?;
 
     Ok(NonZeroU64::new(nar_size_pushed.saturating_add(narinfo_size)))
-}
-
-/// Returns the SHA-256 hash of the bytes the given reader reads until its end.
-async fn sha256(
-    mut reader: impl AsyncRead + Unpin,
-) -> io::Result<Nix32Digest<32>> {
-    let mut sha256 = Sha256::new();
-    let mut buf = vec![0; 64 * 1024];
-
-    loop {
-        match reader.read(&mut buf).await? {
-            0 => break,
-            num_read => sha256.update(&buf[..num_read]),
-        }
-    }
-
-    Ok(Nix32Digest::new(&sha256.finalize().into()))
 }
 
 async fn upstream_caches_have_narinfo<H: HttpClient>(

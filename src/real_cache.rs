@@ -74,8 +74,12 @@ pub(crate) enum CacheRequestError {
     ParseNarMultipartsResponseBody(
         #[source] <nar_multiparts::ResponseBody as FromStr>::Err,
     ),
-    #[display("couldn't parse multipart parts response body")]
-    ParsePartsResponseBody(
+    #[display("couldn't parse NAR multipart completion response body")]
+    ParseNarMultipartsCompleteResponseBody(
+        #[source] <nar_multiparts_complete::ResponseBody as FromStr>::Err,
+    ),
+    #[display("couldn't parse NAR multipart parts response body")]
+    ParseNarMultipartsPartsResponseBody(
         #[source] <nar_multiparts_parts::ResponseBody as FromStr>::Err,
     ),
     #[display("couldn't read NAR bytes")]
@@ -142,14 +146,12 @@ impl RealCache {
         Ok(Self { cache_url: args.cache_url(), client })
     }
 
-    /// Initiates a multipart upload for a NAR of the given size, returning
-    /// `None` if the cache already contains it.
+    /// Initiates a multipart upload for a NAR of the given size.
     async fn initiate_multipart_nar_upload(
         &self,
         token: &SharedToken,
-        nar_file_name: &NarFileName,
         nar_size: NonZeroU64,
-    ) -> Result<Option<nar_multiparts::ResponseBody>, CacheRequestError> {
+    ) -> Result<nar_multiparts::ResponseBody, CacheRequestError> {
         let url = self.nar_multiparts_url();
 
         let response = self
@@ -157,11 +159,7 @@ impl RealCache {
             .post(url.clone())
             .header(header::AUTHORIZATION, token.authorization())
             .body(
-                nar_multiparts::RequestBody {
-                    nar_file_name: nar_file_name.clone(),
-                    file_size: nar_size,
-                }
-                .to_string(),
+                nar_multiparts::RequestBody { file_size: nar_size }.to_string(),
             )
             .send_with_retries()
             .await
@@ -170,17 +168,13 @@ impl RealCache {
                 source,
             })?;
 
-        match response.status() {
-            StatusCode::OK => {},
-            StatusCode::NO_CONTENT => return Ok(None),
-            _ => {
-                return Err(CacheRequestError::unexpected_response(
-                    response,
-                    Method::POST,
-                    url,
-                )
-                .await);
-            },
+        if response.status() != StatusCode::OK {
+            return Err(CacheRequestError::unexpected_response(
+                response,
+                Method::POST,
+                url,
+            )
+            .await);
         }
 
         response
@@ -191,27 +185,22 @@ impl RealCache {
                 source,
             })?
             .parse::<nar_multiparts::ResponseBody>()
-            .map(Some)
             .map_err(CacheRequestError::ParseNarMultipartsResponseBody)
     }
 
     async fn complete_multipart_nar_upload(
         &self,
         token: &SharedToken,
-        nar_file_name: NarFileName,
         upload_id: &nar_multiparts::UploadId,
         etags: SmallVec<[Etag; 8]>,
-    ) -> Result<bool, CacheRequestError> {
+    ) -> Result<nar_multiparts_complete::Response, CacheRequestError> {
         let url = self.nar_multiparts_complete_url(upload_id);
 
         let response = self
             .client
             .post(url.clone())
             .header(header::AUTHORIZATION, token.authorization())
-            .body(
-                nar_multiparts_complete::RequestBody { etags, nar_file_name }
-                    .to_string(),
-            )
+            .body(nar_multiparts_complete::RequestBody { etags }.to_string())
             .send_with_retries()
             .await
             .map_err(|source| CacheRequestError::HttpRequest {
@@ -219,16 +208,32 @@ impl RealCache {
                 source,
             })?;
 
-        match response.status() {
-            StatusCode::CREATED => Ok(true),
-            StatusCode::OK => Ok(false),
-            _ => Err(CacheRequestError::unexpected_response(
-                response,
-                Method::POST,
-                url,
-            )
-            .await),
-        }
+        let into_response = match response.status() {
+            StatusCode::CREATED => nar_multiparts_complete::Response::Created,
+            StatusCode::OK => nar_multiparts_complete::Response::AlreadyExists,
+            _ => {
+                return Err(CacheRequestError::unexpected_response(
+                    response,
+                    Method::POST,
+                    url,
+                )
+                .await);
+            },
+        };
+
+        let body = response
+            .text()
+            .await
+            .map_err(|source| CacheRequestError::HttpRequest {
+                method: Method::POST,
+                source,
+            })?
+            .parse::<nar_multiparts_complete::ResponseBody>()
+            .map_err(
+                CacheRequestError::ParseNarMultipartsCompleteResponseBody,
+            )?;
+
+        Ok(into_response(body))
     }
 
     fn narinfo_url(&self, narinfo_filename: &NarInfoFileName) -> url::Url {
@@ -293,7 +298,6 @@ impl RealCache {
         token: &SharedToken,
         upload_id: &nar_multiparts::UploadId,
         part_numbers: SmallVec<[NonZeroU16; 8]>,
-        nar_file_name: NarFileName,
     ) -> Result<nar_multiparts_parts::ResponseBody, CacheRequestError> {
         let url = self.nar_multiparts_parts_url(upload_id);
 
@@ -302,11 +306,7 @@ impl RealCache {
             .post(url.clone())
             .header(header::AUTHORIZATION, token.authorization())
             .body(
-                nar_multiparts_parts::RequestBody {
-                    part_numbers,
-                    nar_file_name,
-                }
-                .to_string(),
+                nar_multiparts_parts::RequestBody { part_numbers }.to_string(),
             )
             .send_with_retries()
             .await
@@ -332,7 +332,7 @@ impl RealCache {
                 source,
             })?
             .parse::<nar_multiparts_parts::ResponseBody>()
-            .map_err(CacheRequestError::ParsePartsResponseBody)
+            .map_err(CacheRequestError::ParseNarMultipartsPartsResponseBody)
     }
 
     async fn upload_nar_part(
@@ -383,7 +383,6 @@ impl RealCache {
     async fn upload_nar_parts(
         &self,
         token: &SharedToken,
-        nar_file_name: &NarFileName,
         nar_size: NonZeroU64,
         initiate_body: &nar_multiparts::ResponseBody,
         nar_bytes: impl AsyncRead + Send + 'static,
@@ -427,7 +426,6 @@ impl RealCache {
                         token,
                         &initiate_body.upload_id,
                         new_part_numbers,
-                        nar_file_name.clone(),
                     )
                     .await?;
                 part_urls.extend(parts.urls);
@@ -561,37 +559,22 @@ impl context::Cache for RealCache {
     async fn upload_nar_multipart(
         &self,
         token: &SharedToken,
-        nar_file_name: NarFileName,
         nar_size: NonZeroU64,
         nar_bytes: impl AsyncRead + Send + 'static,
-    ) -> Result<u64, Self::Error> {
-        let Some(initiate_body) = self
-            .initiate_multipart_nar_upload(token, &nar_file_name, nar_size)
-            .await?
-        else {
-            return Ok(0);
-        };
+    ) -> Result<nar_multiparts_complete::Response, Self::Error> {
+        let initiate_body =
+            self.initiate_multipart_nar_upload(token, nar_size).await?;
 
         let etags = self
-            .upload_nar_parts(
-                token,
-                &nar_file_name,
-                nar_size,
-                &initiate_body,
-                nar_bytes,
-            )
+            .upload_nar_parts(token, nar_size, &initiate_body, nar_bytes)
             .await?;
 
-        let did_insert = self
-            .complete_multipart_nar_upload(
-                token,
-                nar_file_name,
-                &initiate_body.upload_id,
-                etags,
-            )
-            .await?;
-
-        Ok(if did_insert { nar_size.get() } else { 0 })
+        self.complete_multipart_nar_upload(
+            token,
+            &initiate_body.upload_id,
+            etags,
+        )
+        .await
     }
 
     async fn upload_nar_single_part(
