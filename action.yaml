@@ -22,8 +22,9 @@ inputs:
     description: "Space/newline-separated binary cache URLs whose store paths should not be pushed. If unset, they're the HTTP(S) substituters Nix builds with, including those from a flake's nixConfig (except the cache itself, of course). Use 'none' to push every store path"
     required: false
   github-token:
-    description: "GitHub token used to download release artifacts from private repos"
+    description: "The token authenticating requests to GitHub's API"
     required: false
+    default: ${{ github.token }}
   release-repository:
     description: "Repository containing setup-cache release artifacts"
     required: false
