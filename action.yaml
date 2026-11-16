@@ -3,16 +3,12 @@ name: "sub60's cache action"
 description: "Sets up and drains the sub60 Nix cache uploader"
 
 inputs:
-  origin:
-    description: "The origin of the cache's server"
-    required: false
-    default: "https://cache.sub60.dev"
-  namespace:
-    description: "The sub60 namespace containing the cache"
+  account:
+    description: "The sub60 account that owns the cache"
     required: false
     default: ${{ github.repository_owner }}
   cache:
-    description: "The sub60 cache name"
+    description: "The name of the cache in the selected account"
     required: false
     default: ${{ github.event.repository.name }}
   token:

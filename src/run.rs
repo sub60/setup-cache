@@ -33,6 +33,8 @@ use crate::real_token_fetcher::{
 use crate::tokio::{Tokio, TokioSpawner};
 use crate::{event_loop, token};
 
+const CACHE_ORIGIN: &str = "https://cache.sub60.dev";
+
 #[derive(Debug, clap::Args)]
 pub struct RunArgs {
     #[arg(long)]
@@ -49,10 +51,6 @@ pub struct RunArgs {
     /// The comma-separated URLs of the upstream binary caches.
     #[arg(long, value_parser = parse_upstream_caches)]
     pub(crate) upstream_caches: Option<SmallVec<[url::Url; 2]>>,
-
-    /// The origin of the cache's server, e.g. `https://cache.sub60.dev`.
-    #[arg(long, value_parser = parse_origin)]
-    pub(crate) origin: url::Url,
 
     #[command(flatten)]
     pub(crate) cache_args: RealCacheRunArgs,
@@ -152,16 +150,15 @@ async fn start(
     #[cfg(feature = "sub60-cache")]
     let cache = RealCache::new(&args).map_err(StartError::ConnectToCache)?;
 
-    let token_fetcher =
-        RealTokenFetcher::new(&args.token_fetcher_args, args.origin.clone())
-            .map_err(StartError::NewTokenFetcher)?;
+    let token_fetcher = RealTokenFetcher::new(&args.token_fetcher_args)
+        .map_err(StartError::NewTokenFetcher)?;
 
     let (token, expiration) = match token_fetcher.fetch().await {
         Ok(fetched_token) => fetched_token,
         Err(fetch_error) => return Ok(Started::WithoutToken(fetch_error)),
     };
 
-    token::write_token(&token, &args.origin, &args.netrc_file);
+    token::write_token(&token, &args.cache_url(), &args.netrc_file);
 
     let mut ctx = RealContext::new(nix_store, spawner);
 
@@ -185,26 +182,14 @@ fn parse_upstream_caches(
     value.split(',').filter(|value| !value.is_empty()).map(str::parse).collect()
 }
 
-fn parse_origin(value: &str) -> Result<url::Url, String> {
-    let url = value.parse::<url::Url>().map_err(|err| err.to_string())?;
-
-    if url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
-        return Err(
-            "must be an origin, without a path, query or fragment".into()
-        );
-    }
-
-    Ok(url)
-}
-
 impl RunArgs {
     /// Returns the URL of the cache.
     pub(crate) fn cache_url(&self) -> url::Url {
-        let mut cache_url = self.origin.clone();
+        let mut cache_url = url::Url::parse(CACHE_ORIGIN).expect("valid URL");
         cache_url
             .path_segments_mut()
             .expect("cache URL can be a base")
-            .push(&self.cache_args.namespace)
+            .push(&self.cache_args.account)
             .push(&self.cache_args.cache);
         cache_url
     }

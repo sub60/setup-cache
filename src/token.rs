@@ -70,9 +70,13 @@ impl FromStr for Token {
 }
 
 /// Writes the given token to the netrc file at the given path, which Nix reads
-/// to authenticate its requests to the cache at the given origin.
-pub(crate) fn write_token(token: &Token, origin: &url::Url, netrc_path: &Path) {
-    let host = origin.host_str().expect("origins have a host");
+/// to authenticate its requests to the cache at the given URL.
+pub(crate) fn write_token(
+    token: &Token,
+    cache_url: &url::Url,
+    netrc_path: &Path,
+) {
+    let host = cache_url.host_str().expect("the cache URL has a host");
     let tmp_path = netrc_path.with_extension("tmp");
 
     let write = || -> io::Result<()> {

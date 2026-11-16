@@ -12,13 +12,15 @@ use futures::AsyncRead;
 use nix_types::{NarFileName, NarInfo, NarInfoFileName, StoreHash};
 use reqwest::{Method, StatusCode, header};
 use smallvec::SmallVec;
-use sub60_cache_api::endpoints::{
+use sub60_endpoints_cache::{
+    AccountName,
+    CacheName,
+    Etag,
     missing_narinfos,
     nar_multiparts,
     nar_multiparts_complete,
     nar_multiparts_parts,
 };
-use sub60_cache_api::{CacheName, Etag, NamespaceName};
 
 use crate::async_read_ext::AsyncReadExt;
 use crate::context;
@@ -35,7 +37,7 @@ pub(crate) struct RealCache {
 #[derive(Debug, clap::Args)]
 pub(crate) struct RealCacheRunArgs {
     #[arg(long)]
-    pub(crate) namespace: NamespaceName,
+    pub(crate) account: AccountName,
     #[arg(long)]
     pub(crate) cache: CacheName,
 }
@@ -71,17 +73,11 @@ pub(crate) enum CacheRequestError {
         #[source] <missing_narinfos::ResponseBody as FromStr>::Err,
     ),
     #[display("couldn't parse NAR multipart response body")]
-    ParseNarMultipartsResponseBody(
-        #[source] <nar_multiparts::ResponseBody as FromStr>::Err,
-    ),
+    ParseNarMultipartsResponseBody(#[source] serde_json::Error),
     #[display("couldn't parse NAR multipart completion response body")]
-    ParseNarMultipartsCompleteResponseBody(
-        #[source] <nar_multiparts_complete::ResponseBody as FromStr>::Err,
-    ),
+    ParseNarMultipartsCompleteResponseBody(#[source] serde_json::Error),
     #[display("couldn't parse NAR multipart parts response body")]
-    ParseNarMultipartsPartsResponseBody(
-        #[source] <nar_multiparts_parts::ResponseBody as FromStr>::Err,
-    ),
+    ParseNarMultipartsPartsResponseBody(#[source] serde_json::Error),
     #[display("couldn't read NAR bytes")]
     ReadNar(#[source] io::Error),
     #[display("HTTP {method} request failed")]
@@ -158,9 +154,7 @@ impl RealCache {
             .client
             .post(url.clone())
             .header(header::AUTHORIZATION, token.authorization())
-            .body(
-                nar_multiparts::RequestBody { file_size: nar_size }.to_string(),
-            )
+            .json(&nar_multiparts::RequestBody { file_size: nar_size })
             .send_with_retries()
             .await
             .map_err(|source| CacheRequestError::HttpRequest {
@@ -177,14 +171,11 @@ impl RealCache {
             .await);
         }
 
-        response
-            .text()
-            .await
-            .map_err(|source| CacheRequestError::HttpRequest {
-                method: Method::POST,
-                source,
-            })?
-            .parse::<nar_multiparts::ResponseBody>()
+        let body = response.bytes().await.map_err(|source| {
+            CacheRequestError::HttpRequest { method: Method::POST, source }
+        })?;
+
+        serde_json::from_slice(&body)
             .map_err(CacheRequestError::ParseNarMultipartsResponseBody)
     }
 
@@ -200,7 +191,7 @@ impl RealCache {
             .client
             .post(url.clone())
             .header(header::AUTHORIZATION, token.authorization())
-            .body(nar_multiparts_complete::RequestBody { etags }.to_string())
+            .json(&nar_multiparts_complete::RequestBody { etags })
             .send_with_retries()
             .await
             .map_err(|source| CacheRequestError::HttpRequest {
@@ -221,19 +212,13 @@ impl RealCache {
             },
         };
 
-        let body = response
-            .text()
-            .await
-            .map_err(|source| CacheRequestError::HttpRequest {
-                method: Method::POST,
-                source,
-            })?
-            .parse::<nar_multiparts_complete::ResponseBody>()
-            .map_err(
-                CacheRequestError::ParseNarMultipartsCompleteResponseBody,
-            )?;
+        let body = response.bytes().await.map_err(|source| {
+            CacheRequestError::HttpRequest { method: Method::POST, source }
+        })?;
 
-        Ok(into_response(body))
+        serde_json::from_slice(&body)
+            .map(into_response)
+            .map_err(CacheRequestError::ParseNarMultipartsCompleteResponseBody)
     }
 
     fn narinfo_url(&self, narinfo_filename: &NarInfoFileName) -> url::Url {
@@ -305,9 +290,7 @@ impl RealCache {
             .client
             .post(url.clone())
             .header(header::AUTHORIZATION, token.authorization())
-            .body(
-                nar_multiparts_parts::RequestBody { part_numbers }.to_string(),
-            )
+            .json(&nar_multiparts_parts::RequestBody { part_numbers })
             .send_with_retries()
             .await
             .map_err(|source| CacheRequestError::HttpRequest {
@@ -324,14 +307,11 @@ impl RealCache {
             .await);
         }
 
-        response
-            .text()
-            .await
-            .map_err(|source| CacheRequestError::HttpRequest {
-                method: Method::POST,
-                source,
-            })?
-            .parse::<nar_multiparts_parts::ResponseBody>()
+        let body = response.bytes().await.map_err(|source| {
+            CacheRequestError::HttpRequest { method: Method::POST, source }
+        })?;
+
+        serde_json::from_slice(&body)
             .map_err(CacheRequestError::ParseNarMultipartsPartsResponseBody)
     }
 

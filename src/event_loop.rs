@@ -30,7 +30,7 @@ use nix_types::{
 use pin_project_lite::pin_project;
 use sha2::{Digest, Sha256};
 use smallvec::SmallVec;
-use sub60_cache_api::endpoints::nar_multiparts_complete;
+use sub60_endpoints_cache::nar_multiparts_complete;
 
 use crate::context::{
     Cache,
@@ -288,7 +288,7 @@ pub(crate) async fn run<Ctx: Context>(
             refresh = token_refresh => {
                 match refresh {
                     Ok((new_token, expires_in)) => {
-                        token::write_token(&new_token, &args.origin, &args.netrc_file);
+                        token::write_token(&new_token, &cache_url, &args.netrc_file);
                         token.update(new_token);
                         if let Some(expires_in) = expires_in {
                             token_refresh.set(

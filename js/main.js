@@ -395,8 +395,7 @@ const parseUpstreamCaches = (input) => {
  * @returns {Promise<void>}
  */
 const main = async () => {
-  const origin = core.getInput("origin", { required: true });
-  const namespace = core.getInput("namespace", { required: true });
+  const account = core.getInput("account", { required: true });
   const cache = core.getInput("cache", { required: true });
   const token = core.getInput("token");
   const upstreamCaches = parseUpstreamCaches(core.getInput("upstream-caches"));
@@ -479,10 +478,8 @@ const main = async () => {
       "3",
       "--netrc-file",
       paths.netrc,
-      "--origin",
-      origin,
-      "--namespace",
-      namespace,
+      "--account",
+      account,
       "--cache",
       cache,
     ];

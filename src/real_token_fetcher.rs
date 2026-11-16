@@ -3,13 +3,14 @@
 use core::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use reqwest::{StatusCode, header};
-use sub60_cache_api::Endpoint as _;
-use sub60_cache_api::endpoints::auth_github_actions;
+use reqwest::StatusCode;
+use sub60_endpoints_api::{Endpoint as _, auth_github_actions_token};
 
 use crate::context;
 use crate::real_cache::ResponseBodySuffix;
 use crate::token::{InvalidTokenError, Token};
+
+const API_ORIGIN: &str = "https://api.sub60.dev";
 
 /// How long to wait before each retry of an exchange that failed for a reason
 /// that might be transient.
@@ -21,8 +22,8 @@ pub(crate) enum RealTokenFetcher {
     /// A token given by the user.
     Token(Token),
 
-    /// The tokens the cache gives in exchange for the OIDC tokens of the
-    /// GitHub Actions job the daemon runs in.
+    /// The tokens the API gives in exchange for the OIDC tokens of the GitHub
+    /// Actions job the daemon runs in.
     GitHubActions(GitHubActions),
 }
 
@@ -51,9 +52,6 @@ pub(crate) struct GitHubActions {
 
     /// The bearer token authenticating requests for the job's OIDC tokens.
     oidc_token_request_token: String,
-
-    /// The origin of the cache's server.
-    origin: url::Url,
 }
 
 #[derive(Debug, derive_more::Display, cauchy::Error)]
@@ -102,7 +100,6 @@ struct OidcTokenResponseBody {
 impl RealTokenFetcher {
     pub(crate) fn new(
         args: &RealTokenFetcherArgs,
-        origin: url::Url,
     ) -> Result<Self, NewRealTokenFetcherError> {
         match args {
             RealTokenFetcherArgs { token: Some(token), .. } => {
@@ -118,7 +115,6 @@ impl RealTokenFetcher {
                     .map_err(NewRealTokenFetcherError::BuildHttpClient)?,
                 oidc_token_request_url: url.clone(),
                 oidc_token_request_token: token.clone(),
-                origin,
             })),
             _ => Err(NewRealTokenFetcherError::NoToken),
         }
@@ -163,12 +159,9 @@ impl GitHubActions {
     /// Requests the job's OIDC token, and exchanges it for one of the cache's.
     async fn exchange(
         &self,
-    ) -> Result<auth_github_actions::ResponseBody, FetchTokenError> {
+    ) -> Result<auth_github_actions_token::Response, FetchTokenError> {
         let mut oidc_token_url = self.oidc_token_request_url.clone();
-        oidc_token_url.query_pairs_mut().append_pair(
-            "audience",
-            &self.origin.origin().ascii_serialization(),
-        );
+        oidc_token_url.query_pairs_mut().append_pair("audience", API_ORIGIN);
 
         let response = self
             .client
@@ -191,19 +184,15 @@ impl GitHubActions {
             .map_err(FetchTokenError::ParseOidcToken)?
             .value;
 
-        let exchange_url = self
-            .origin
-            .join(auth_github_actions::Endpoint::PATH)
-            .expect("valid URL");
+        let exchange_url = format!(
+            "{API_ORIGIN}{}",
+            auth_github_actions_token::Endpoint::PATH
+        );
 
         let response = self
             .client
             .post(exchange_url)
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(
-                auth_github_actions::RequestBody { token: oidc_token }
-                    .to_string(),
-            )
+            .json(&auth_github_actions_token::Request { token: oidc_token })
             .send()
             .await
             .map_err(FetchTokenError::Exchange)?;
@@ -216,7 +205,7 @@ impl GitHubActions {
             return Err(FetchTokenError::ExchangeResponse { status, body });
         }
 
-        body.parse().map_err(FetchTokenError::ParseExchange)
+        serde_json::from_str(&body).map_err(FetchTokenError::ParseExchange)
     }
 }
 

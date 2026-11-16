@@ -11,7 +11,7 @@ use nix_types::{
     StoreHash,
 };
 use sha2::{Digest, Sha256};
-use sub60_cache_api::endpoints::nar_multiparts_complete;
+use sub60_endpoints_cache::nar_multiparts_complete;
 
 use crate::context::Cache;
 use crate::protocol::StoreDir;
