@@ -11,7 +11,8 @@ use nix_types::{
     StoreHash,
 };
 use sha2::{Digest, Sha256};
-use sub60_endpoints_cache::nar_multiparts_complete;
+use sub60_endpoints::cache::nar_multiparts_complete;
+use sub60_endpoints::{Json, WithStatus};
 
 use crate::context::Cache;
 use crate::protocol::StoreDir;
@@ -53,11 +54,11 @@ impl Cache for NoopCache {
             }
         }
 
-        Ok(nar_multiparts_complete::Response::Created(
-            nar_multiparts_complete::ResponseBody {
-                file_hash: Nix32Digest::new(&sha256.finalize().into()),
-            },
-        ))
+        let body = nar_multiparts_complete::ResponseBody {
+            file_hash: Nix32Digest::new(sha256.finalize().into()),
+        };
+
+        Ok(nar_multiparts_complete::Response::Created(WithStatus(Json(body))))
     }
 
     async fn upload_nar_single_part(

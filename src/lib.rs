@@ -1,6 +1,3 @@
-#![allow(incomplete_features)]
-#![feature(generic_const_exprs)]
-
 #[cfg(not(feature = "sub60-cache"))]
 mod any_cache;
 mod async_read_ext;

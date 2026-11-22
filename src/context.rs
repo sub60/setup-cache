@@ -14,7 +14,7 @@ use nix_types::{
     StoreHash,
     StorePath,
 };
-use sub60_endpoints_cache::nar_multiparts_complete;
+use sub60_endpoints::cache::nar_multiparts_complete;
 
 use crate::event_loop;
 use crate::protocol::{self, StoreDir};

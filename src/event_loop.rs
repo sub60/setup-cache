@@ -30,7 +30,7 @@ use nix_types::{
 use pin_project_lite::pin_project;
 use sha2::{Digest, Sha256};
 use smallvec::SmallVec;
-use sub60_endpoints_cache::nar_multiparts_complete;
+use sub60_endpoints::cache::nar_multiparts_complete;
 
 use crate::context::{
     Cache,
@@ -510,7 +510,7 @@ async fn handle_store_path<C: Cache, H: HttpClient, N: Nix>(
             .await
             .map_err(HandlePathError::ReadNarBuffer)?;
 
-        let file_hash = Nix32Digest::new(&Sha256::digest(&nar_bytes).into());
+        let file_hash = Nix32Digest::new(Sha256::digest(&nar_bytes).into());
 
         let nar_size_pushed = cache
             .upload_nar_single_part(

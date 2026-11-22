@@ -207,7 +207,7 @@ impl StorePathExt for nixb::store::StorePath {
                 ))
             })
         })?;
-        Ok(StoreBasename { hash: Nix32Digest::new(&hash), name })
+        Ok(StoreBasename { hash: Nix32Digest::new(hash), name })
     }
 }
 

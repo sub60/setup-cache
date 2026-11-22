@@ -2,7 +2,7 @@ use core::num::NonZeroU64;
 
 use futures::AsyncRead;
 use nix_types::{NarFileName, NarInfo, NarInfoFileName, StoreHash};
-use sub60_endpoints_cache::nar_multiparts_complete;
+use sub60_endpoints::cache::nar_multiparts_complete;
 
 use crate::context::Cache;
 use crate::noop_cache::NoopCache;

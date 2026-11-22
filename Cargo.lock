@@ -173,8 +173,7 @@ dependencies = [
  "sha2",
  "smallvec",
  "smol_str",
- "sub60-endpoints-api",
- "sub60-endpoints-cache",
+ "sub60-endpoints",
  "tempfile",
  "tokio",
  "url",
@@ -1127,7 +1126,7 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 [[package]]
 name = "nix-types"
 version = "0.1.0"
-source = "git+https://github.com/sub60/endpoints.git#e95207cf9c1871e8d4920efc8766c5fc32384abe"
+source = "git+https://github.com/sub60/endpoints.git#8d145ee08947467b6a00fc6b9a6bfdc174958c7b"
 dependencies = [
  "base64",
  "cauchy",
@@ -1135,6 +1134,7 @@ dependencies = [
  "ed25519-dalek",
  "memchr",
  "rand_core",
+ "schemars",
  "serde",
  "smallvec",
  "smol_str",
@@ -1593,6 +1593,8 @@ dependencies = [
  "schemars_derive",
  "serde",
  "serde_json",
+ "smallvec",
+ "url",
 ]
 
 [[package]]
@@ -1792,26 +1794,39 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
+name = "sub60-endpoints"
+version = "0.1.0"
+source = "git+https://github.com/sub60/endpoints.git#8d145ee08947467b6a00fc6b9a6bfdc174958c7b"
+dependencies = [
+ "sub60-endpoints-api",
+ "sub60-endpoints-cache",
+ "sub60-endpoints-common",
+]
+
+[[package]]
 name = "sub60-endpoints-api"
 version = "0.1.0"
-source = "git+https://github.com/sub60/endpoints.git#e95207cf9c1871e8d4920efc8766c5fc32384abe"
+source = "git+https://github.com/sub60/endpoints.git#8d145ee08947467b6a00fc6b9a6bfdc174958c7b"
 dependencies = [
  "derive_more",
  "http",
+ "nix-types",
  "schemars",
  "serde",
  "sub60-endpoints-common",
+ "url",
 ]
 
 [[package]]
 name = "sub60-endpoints-cache"
 version = "0.1.0"
-source = "git+https://github.com/sub60/endpoints.git#e95207cf9c1871e8d4920efc8766c5fc32384abe"
+source = "git+https://github.com/sub60/endpoints.git#8d145ee08947467b6a00fc6b9a6bfdc174958c7b"
 dependencies = [
  "cauchy",
  "derive_more",
  "http",
  "nix-types",
+ "schemars",
  "serde",
  "smallvec",
  "smol_str",
@@ -1822,7 +1837,7 @@ dependencies = [
 [[package]]
 name = "sub60-endpoints-common"
 version = "0.1.0"
-source = "git+https://github.com/sub60/endpoints.git#e95207cf9c1871e8d4920efc8766c5fc32384abe"
+source = "git+https://github.com/sub60/endpoints.git#8d145ee08947467b6a00fc6b9a6bfdc174958c7b"
 dependencies = [
  "cauchy",
  "const_format",
@@ -1831,6 +1846,7 @@ dependencies = [
  "percent-encoding",
  "schemars",
  "serde",
+ "serde_json",
  "smol_str",
  "sub60-endpoints-macros",
 ]
@@ -1838,7 +1854,7 @@ dependencies = [
 [[package]]
 name = "sub60-endpoints-macros"
 version = "0.1.0"
-source = "git+https://github.com/sub60/endpoints.git#e95207cf9c1871e8d4920efc8766c5fc32384abe"
+source = "git+https://github.com/sub60/endpoints.git#8d145ee08947467b6a00fc6b9a6bfdc174958c7b"
 dependencies = [
  "proc-macro2",
  "quote",

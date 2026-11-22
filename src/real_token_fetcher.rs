@@ -4,7 +4,8 @@ use core::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use reqwest::StatusCode;
-use sub60_endpoints_api::{Endpoint as _, auth_github_actions_token};
+use sub60_endpoints::Endpoint as _;
+use sub60_endpoints::api::auth_github_actions_token;
 
 use crate::context;
 use crate::real_cache::ResponseBodySuffix;
@@ -153,7 +154,9 @@ impl GitHubActions {
         let token =
             response.token.parse().map_err(FetchTokenError::InvalidToken)?;
 
-        Ok((token, response.expires_at.saturating_sub(unix_ts())))
+        let expires_at = Duration::from(response.expires_at);
+
+        Ok((token, expires_at.saturating_sub(unix_ts())))
     }
 
     /// Requests the job's OIDC token, and exchanges it for one of the cache's.

@@ -12,15 +12,14 @@ use futures::AsyncRead;
 use nix_types::{NarFileName, NarInfo, NarInfoFileName, StoreHash};
 use reqwest::{Method, StatusCode, header};
 use smallvec::SmallVec;
-use sub60_endpoints_cache::{
-    AccountName,
-    CacheName,
+use sub60_endpoints::cache::{
     Etag,
     missing_narinfos,
     nar_multiparts,
     nar_multiparts_complete,
     nar_multiparts_parts,
 };
+use sub60_endpoints::{AccountName, CacheName, Json, WithStatus};
 
 use crate::async_read_ext::AsyncReadExt;
 use crate::context;
@@ -199,26 +198,30 @@ impl RealCache {
                 source,
             })?;
 
-        let into_response = match response.status() {
-            StatusCode::CREATED => nar_multiparts_complete::Response::Created,
-            StatusCode::OK => nar_multiparts_complete::Response::AlreadyExists,
-            _ => {
-                return Err(CacheRequestError::unexpected_response(
-                    response,
-                    Method::POST,
-                    url,
-                )
-                .await);
-            },
-        };
+        let status = response.status();
+
+        if !matches!(status, StatusCode::CREATED | StatusCode::OK) {
+            return Err(CacheRequestError::unexpected_response(
+                response,
+                Method::POST,
+                url,
+            )
+            .await);
+        }
 
         let body = response.bytes().await.map_err(|source| {
             CacheRequestError::HttpRequest { method: Method::POST, source }
         })?;
 
-        serde_json::from_slice(&body)
-            .map(into_response)
-            .map_err(CacheRequestError::ParseNarMultipartsCompleteResponseBody)
+        let body = serde_json::from_slice(&body).map(Json).map_err(
+            CacheRequestError::ParseNarMultipartsCompleteResponseBody,
+        )?;
+
+        Ok(if status == StatusCode::CREATED {
+            nar_multiparts_complete::Response::Created(WithStatus(body))
+        } else {
+            nar_multiparts_complete::Response::AlreadyExists(WithStatus(body))
+        })
     }
 
     fn narinfo_url(&self, narinfo_filename: &NarInfoFileName) -> url::Url {
@@ -392,7 +395,7 @@ impl RealCache {
             // Discard the current upload URLs if they're past their expiration
             // timestamp, with some safety buffer to account for clock skew and
             // network delay.
-            if now + Duration::from_secs(10) >= urls_expiration_ts {
+            if now + Duration::from_secs(10) >= urls_expiration_ts.into() {
                 part_urls.clear();
             }
 
